@@ -1,0 +1,34 @@
+digraph unix {
+  graph [ dpi = 72 ]; 
+  graph [nodesep = 0.25; ranksep=0.25];
+  fontname="Arial"
+  node [fontname="Arial"]
+  edge [fontname="Arial"]
+  subgraph cluster_level1_110 {
+    label = "level1"; // scope
+    s1_98 [
+      label = "s1"; // node
+    ];
+    s0_99 [
+      label = "s0"; // node
+    ];
+    c0_101 [
+      label = "c0"; // node
+    ];
+    c1_102 [
+      label = "c1"; // node
+    ];
+    subgraph cluster_level0_112 {
+      label = "level0"; // scope
+      x_100 [
+        label = "x"; // node
+      ];
+      
+    }
+    
+  }
+  "s1_98" -> "x_100";
+  "s0_99" -> "x_100";
+  "x_100" -> "c0_101";
+  "x_100" -> "c1_102";
+}

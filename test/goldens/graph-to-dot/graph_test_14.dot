@@ -1,0 +1,22 @@
+digraph unix {
+  graph [ dpi = 72 ]; 
+  graph [nodesep = 0.25; ranksep=0.25];
+  fontname="Arial"
+  node [fontname="Arial"]
+  edge [fontname="Arial"]
+  subgraph cluster_a_304 {
+    label = "a"; // scope
+    invisible0 [label = "", shape = point, style=invis]; // a
+    subgraph cluster_b_306 {
+      label = "b"; // scope
+      invisible1 [label = "", shape = point, style=invis]; // b
+      subgraph cluster_c_308 {
+        label = "c"; // scope
+        invisible2 [label = "", shape = point, style=invis]; // c
+        
+      }
+      
+    }
+    
+  }
+}

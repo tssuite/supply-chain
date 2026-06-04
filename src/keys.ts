@@ -1,0 +1,75 @@
+// @license
+// Copyright (c) 2025 tssuite
+//
+// Use of this source code is governed by terms that can be
+// found in the LICENSE file in the root of this package.
+
+/** A list of default keys used for nodes. */
+export const keys: readonly string[] = [
+  'aaliyah', 'aaron', 'abel', 'abigail', 'abraham', 'adam', 'addison',
+  'adelaide', 'adele', 'adeline', 'adrian', 'adriel', 'aiden', 'alaina',
+  'alan', 'alana', 'alejandro', 'alex', 'alexander', 'alexandra',
+  'alexandria', 'alia', 'alice', 'alina', 'allison', 'alondra', 'amanda',
+  'amara', 'amaya', 'amelia', 'amelie', 'anastasia', 'anaya', 'andrew',
+  'angelo', 'annabella', 'annabelle', 'annalise', 'annie', 'anthony',
+  'antonio', 'arabella', 'aria', 'ariana', 'arianna', 'ariel', 'aryanna',
+  'athena', 'aubree', 'aubrey', 'audrey', 'aurora', 'austin', 'autumn',
+  'ava', 'avery', 'ayden', 'aylin', 'benjamin', 'bennett', 'blake',
+  'brendan', 'brennan', 'brian', 'briella', 'brielle', 'brittany', 'brody',
+  'brooke', 'brooklyn', 'brooks', 'bryan', 'byron', 'caden', 'caleb',
+  'calvin', 'camila', 'carlos', 'carson', 'carter', 'catalina', 'cecilia',
+  'celeste', 'cesar', 'charles', 'charlotte', 'chase', 'chloe', 'christian',
+  'christopher', 'claire', 'clara', 'cody', 'colby', 'cole', 'colin',
+  'colton', 'connor', 'cooper', 'corbin', 'cullen', 'damian', 'damien',
+  'daniel', 'daniela', 'david', 'delaney', 'delilah', 'derek', 'desmond',
+  'devin', 'diego', 'dominic', 'eddie', 'eden', 'elaina', 'eleanor',
+  'elena', 'eli', 'elian', 'eliana', 'elias', 'elijah', 'elisa', 'elise',
+  'eliza', 'elizabeth', 'ella', 'ellie', 'eloise', 'emery', 'emilia',
+  'emily', 'emma', 'eric', 'erick', 'esmeralda', 'ethan', 'eva', 'evan',
+  'evelyn', 'ezekiel', 'ezra', 'faith', 'fatima', 'felix', 'finnley',
+  'fiona', 'francesca', 'gabriel', 'gabriela', 'gabriella', 'gabrielle',
+  'gage', 'garrett', 'gemma', 'genevieve', 'george', 'gia', 'giselle',
+  'grace', 'grant', 'grayson', 'hailey', 'hannah', 'harper', 'hayden',
+  'hayes', 'hayley', 'henry', 'holland', 'hunter', 'ian', 'imani', 'irene',
+  'iris', 'isaac', 'isabel', 'isabella', 'isabelle', 'isaiah', 'isla',
+  'jace', 'jack', 'jackson', 'jade', 'jaden', 'jamal', 'james', 'jasper',
+  'jaxon', 'jaxson', 'jayda', 'jayden', 'jaylene', 'jazmine', 'jennifer',
+  'jeremiah', 'jeremy', 'jesse', 'jimena', 'joel', 'john', 'jonathan',
+  'jordan', 'jordyn', 'jose', 'joseph', 'jude', 'julia', 'julian',
+  'julianna', 'june', 'kaden', 'kai', 'kaia', 'kaiden', 'kaleb', 'kaliyah',
+  'kayla', 'kaylee', 'kendra', 'kensley', 'kiana', 'kingston', 'kinsley',
+  'kyle', 'laila', 'laura', 'layla', 'leah', 'leland', 'leo', 'leon',
+  'leona', 'leonardo', 'levi', 'liam', 'lila', 'lillian', 'lily', 'lincoln',
+  'logan', 'lola', 'lucas', 'luciana', 'lucy', 'luke', 'lyla', 'maci',
+  'mackenzie', 'madelyn', 'madison', 'maeve', 'makenzie', 'malik', 'mara',
+  'mariah', 'mariam', 'marilyn', 'mark', 'marley', 'mary', 'mason', 'mateo',
+  'matilda', 'matthew', 'max', 'maximilian', 'maximiliano', 'maximus',
+  'maxine', 'maxwell', 'maya', 'meghan', 'mia', 'micah', 'michael',
+  'michelle', 'miguel', 'miles', 'millie', 'myles', 'naomi', 'natalie',
+  'nathaniel', 'nehemiah', 'nia', 'nicholas', 'nico', 'nicolas', 'noah',
+  'noelle', 'nolan', 'nova', 'nyla', 'olive', 'oliver', 'olivia', 'oscar',
+  'owen', 'paige', 'paisley', 'paul', 'pedro', 'penelope', 'phillip',
+  'piper', 'preston', 'raegan', 'rafael', 'reagan', 'rebecca', 'remy',
+  'rhett', 'rhys', 'riley', 'river', 'robert', 'roman', 'ronin', 'rose',
+  'rosemary', 'ruben', 'ruby', 'ryder', 'sadie', 'samuel', 'sarah',
+  'savannah', 'scarlett', 'sebastian', 'selena', 'serenity', 'seth',
+  'shane', 'shayla', 'silas', 'skylar', 'sofia', 'sonia', 'sophia',
+  'sophie', 'stella', 'sutton', 'talia', 'taliyah', 'tatum', 'taylor',
+  'tessa', 'theo', 'thomas', 'timothy', 'titus', 'trace', 'tristan',
+  'tristen', 'valentina', 'valeria', 'vanessa', 'victor', 'victoria',
+  'violet', 'warren', 'wesley', 'william', 'willow', 'winston', 'xavier',
+  'yaretzi', 'zachary', 'zane', 'zoe', 'zoey',
+];
+
+let keyCounter = 0;
+
+/** Returns the next key from the list of keys. */
+export const nextKey = (): string => keys[keyCounter++ % keys.length];
+
+/**
+ * Use this function to reset the next key counter in tests.
+ * @param counter - The counter value to set.
+ */
+export const testSetNextKeyCounter = (counter: number): void => {
+  keyCounter = counter;
+};

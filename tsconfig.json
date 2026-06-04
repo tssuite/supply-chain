@@ -1,0 +1,37 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "useDefineForClassFields": true,
+    "module": "NodeNext",
+    "lib": ["esnext", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    /* Distribution */
+    "rootDir": "src",
+    "outDir": "dist/",
+    "declaration": true,
+    "noEmitOnError": true,
+    "emitDeclarationOnly": false,
+    "esModuleInterop": true,
+    "noEmit": true,
+
+    /* Bundler mode */
+    "moduleResolution": "nodenext",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+
+    /** Json modules **/
+    "resolveJsonModule": true,
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true
+  },
+  "include": ["./src/"],
+  "exclude": ["./test/"]
+}
