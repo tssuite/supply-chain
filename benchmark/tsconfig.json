@@ -1,0 +1,20 @@
+{
+  // The root tsconfig only includes `src/`, so the benchmark files have no
+  // covering project and editors type-check them with an inferred config that
+  // lacks `"types": ["node"]` — hence "Cannot find name 'node:fs'". This
+  // config re-includes them (inheriting node types) for type-check only; it
+  // never emits and is not part of the build. Same pattern as test/tsconfig.json.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "emitDeclarationOnly": false,
+    "declaration": false,
+    "declarationMap": false,
+    // The base config sets rootDir to `src`, but the benchmark program also
+    // pulls in files outside `src`. Widen rootDir to the project root
+    // (type-check only; never emits).
+    "rootDir": ".."
+  },
+  "include": ["**/*.ts"],
+  "exclude": []
+}

@@ -17,19 +17,24 @@ export class Priority {
     readonly value: number,
     /** The name of the priority. */
     readonly name: string,
+    /**
+     * The position in {@link Priority.values} (Dart's `enum.index`).
+     * Used e.g. to index the SCM's per-priority ready queues.
+     */
+    readonly index: number,
   ) {}
 
   /** Nodes with frame priority are updated once in a frame. */
-  static readonly frame = new Priority(1, 'frame');
+  static readonly frame = new Priority(1, 'frame', 0);
 
   /** Nodes with realtime priority are updated immediately. */
-  static readonly realtime = new Priority(2, 'realtime');
+  static readonly realtime = new Priority(2, 'realtime', 1);
 
   /**
    * Nodes with structure priority are updated before all others.
    * Use this priority for dynamic chain structure updates.
    */
-  static readonly structure = new Priority(3, 'structure');
+  static readonly structure = new Priority(3, 'structure', 2);
 
   /** All priorities in declaration order. */
   static readonly values: readonly Priority[] = [

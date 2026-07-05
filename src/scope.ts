@@ -390,6 +390,13 @@ export class Scope {
    * @param key - The key or alias of the child scope.
    */
   child(key: string): Scope | undefined {
+    // Fast path: _children is keyed by the child's key
+    const direct = this._children.get(key);
+    if (direct != null && !direct.isDisposed) {
+      return direct;
+    }
+
+    // Slow path: the key may match an alias of a child
     for (const child of this.children) {
       if (child.matchesKey(key)) {
         return child;
@@ -588,6 +595,15 @@ export class Scope {
     return this._findItemInOwnScope<T>(key, [], true, true, false, [], []) as
       | Node<T>
       | undefined;
+  }
+
+  /**
+   * Returns the own node (including inserts) with exactly the given key,
+   * or undefined if not found.
+   * @param key - The exact key of the node.
+   */
+  nodeByKey(key: string): Node<any> | undefined {
+    return this._nodes.get(key);
   }
 
   /**
@@ -2227,9 +2243,11 @@ export class Scope {
     }
 
     // Otherwise this scope becomes a smart scope when it is contained in a
-    // smart scope.
-    if (this.parent?.isSmartScope === true) {
-      return [...this.parent.smartMaster, this.key];
+    // smart scope. Compute the parent's smart master only once - it
+    // recurses up the scope tree.
+    const parentSmartMaster = this.parent?.smartMaster;
+    if (parentSmartMaster != null && parentSmartMaster.length !== 0) {
+      return [...parentSmartMaster, this.key];
     }
 
     return [];

@@ -133,6 +133,22 @@ export class Scm {
   private readonly preparedRealtimeNodesSet = new Set<Node<any>>();
   private readonly producingNodesSet = new Set<Node<any>>();
 
+  // Ready-node queues, indexed by Priority.index.
+  //
+  // These queues are an acceleration index over the prepared sets above:
+  // whenever a node enters the prepared sets and is ready to produce, it is
+  // also added to the queue matching its priority. produce() then picks the
+  // next batch from these queues in O(batch) instead of rescanning all
+  // prepared nodes on every cycle. The prepared sets remain the source of
+  // truth: queue entries are hints that are re-validated (and re-bucketed
+  // when a node's priority changed) before production.
+  private readonly readyNodes: Set<Node<any>>[] = Priority.values.map(
+    () => new Set<Node<any>>(),
+  );
+  private readonly readyInsertNodes: Set<Node<any>>[] = Priority.values.map(
+    () => new Set<Node<any>>(),
+  );
+
   // In-flight asynchronous productions, keyed by node (one per node).
   private readonly asyncProductions = new Map<
     Node<any>,
@@ -226,6 +242,15 @@ export class Scm {
   }
 
   /**
+   * Called by Node.dispose: removes the node from the prepared sets so
+   * that disposed nodes do not keep the production pipeline open.
+   * @param node - The disposed node.
+   */
+  removeDisposedNode(node: Node<any>): void {
+    this.removePreparedNode(node);
+  }
+
+  /**
    * Adds node for initialization of suppliers.
    * @param node - The node needing supplier init.
    */
@@ -238,15 +263,17 @@ export class Scm {
    * @param node - The node to nominate.
    */
   nominate(node: Node<any>): void {
-    // If the node has no customers, it is more efficient to produce it directly
+    // If the node has no customers, it is more efficient to produce it
+    // directly. Check the cheap O(1) conditions first; isReadyToProduce
+    // scans the suppliers and is evaluated last.
     if (
-      node.isReadyToProduce &&
       node.suppliers.length === 0 &&
       node.customers.length === 0 &&
       node.inserts.length === 0 &&
       node.isInitialized &&
       !node.isInsert &&
-      !node.isDisposed
+      !node.isDisposed &&
+      node.isReadyToProduce
     ) {
       node.produce({ announce: false, triggerOnChange: true });
 
@@ -401,7 +428,27 @@ export class Scm {
     this.preparedInsertNodesSet.clear();
     this.producingNodesSet.clear();
     this.asyncProductions.clear();
+
+    for (const queue of this.readyNodes) {
+      queue.clear();
+    }
+    for (const queue of this.readyInsertNodes) {
+      queue.clear();
+    }
   }
+
+  /**
+   * Hands out monotonically increasing topological ranks for new nodes.
+   *
+   * Nodes keep their rank a valid topological order of the supplier graph
+   * (suppliers before customers). This makes cycle detection cheap: adding
+   * an edge from a lower to a higher rank can never close a cycle.
+   */
+  nextTopoRank(): number {
+    return this.nextTopoRankCounter++;
+  }
+
+  private nextTopoRankCounter = 0;
 
   // ...........................................................................
   // SmartNodes
@@ -700,33 +747,55 @@ export class Scm {
     this.scheduleProduction();
   }
 
+  /**
+   * Prepares a node and its customers.
+   *
+   * Implemented iteratively with an explicit stack: the customer graph can
+   * be deeper than the call stack allows (a recursive implementation
+   * overflows on chains of a few thousand nodes).
+   * @param node - The node to prepare.
+   */
   private prepareNode(node: Node<any>): void {
-    const isAlreadyPrepared = !node.needsPreparation();
-    if (isAlreadyPrepared) {
-      return;
-    }
+    const stack: Node<any>[] = [node];
 
-    node.prepare();
+    while (stack.length > 0) {
+      const current = stack.pop()!;
 
-    for (const insert of node.inserts) {
-      this.prepareNode(insert);
-    }
+      // Node is already prepared?
+      const isAlreadyPrepared = !current.needsPreparation();
+      if (isAlreadyPrepared) {
+        continue;
+      }
 
-    if (node.isInsert) {
-      this.prepareInsert(node as unknown as Insert<any>);
-    }
+      // Nodes needs preparation? Prepare.
+      current.prepare();
 
-    for (const customer of node.customers) {
-      this.prepareNode(customer);
+      // Prepare all inserts
+      for (const insert of current.inserts) {
+        stack.push(insert);
+      }
+
+      // If node is a insert
+      if (current.isInsert) {
+        this.prepareInsert(current as unknown as Insert<any>, stack);
+      }
+
+      // Prepare also all customers
+      for (const customer of current.customers) {
+        stack.push(customer);
+      }
     }
   }
 
-  private prepareInsert(node: Insert<any>): void {
+  private prepareInsert(node: Insert<any>, stack: Node<any>[]): void {
+    // Last insert? Prepare also host's customers
     if (node.isLastInsert) {
       for (const customer of node.host.customers) {
-        this.prepareNode(customer);
+        stack.push(customer);
       }
-    } else {
+    }
+    // Not last insert? Prepare the following inserts
+    else {
       let isLaterInsert = false;
       for (const insert of node.host.inserts) {
         if (insert === (node as unknown)) {
@@ -734,7 +803,7 @@ export class Scm {
           continue;
         }
         if (isLaterInsert) {
-          this.prepareNode(insert);
+          stack.push(insert);
         }
       }
     }
@@ -759,79 +828,186 @@ export class Scm {
       return;
     }
 
-    // Remove disposed nodes
-    for (const set of [
-      this.preparedNodesSet,
-      this.preparedInsertNodesSet,
-      this.preparedRealtimeNodesSet,
-    ]) {
-      for (const n of [...set]) {
-        if (n.isDisposed) {
-          set.delete(n);
-        }
-      }
-    }
-
-    if (!this.preparedNodesAreEmpty && this.shouldTimeOut) {
+    // Start timeout timer
+    if (this.shouldTimeOut) {
       this.startTimeoutCheck();
     }
 
+    // Drop stale queue entries and move nodes whose priority has changed
+    // since they became ready into the right queue.
+    this.revalidateReadyQueues();
+
+    // Process nodes grouped by priority
+    for (const priority of [...Priority.values].reverse()) {
+      // Don't process priorities below minimum production priority
+      if (priority.value < this.minProductionPriorityInner.value) {
+        continue;
+      }
+
+      // Get nodes that have the desired priority
+      // Process inserts first
+      const insertQueue = this.readyInsertNodes[priority.index];
+      const queue =
+        insertQueue.size > 0 ? insertQueue : this.readyNodes[priority.index];
+
+      // Continue if no such nodes are available
+      if (queue.size === 0) {
+        continue;
+      }
+
+      const batch = [...queue];
+      queue.clear();
+      this.produceBatch(batch);
+
+      // We process only nodes of one priority level in a cycle.
+      // Thus we are making sure that all nodes of a given priority are
+      // processed before the others start.
+      return;
+    }
+
+    // Fallback: The queues are empty, but prepared nodes exist. This happens
+    // e.g. when nodes were put into the prepared sets from outside without
+    // going through addPreparedNodes. Fall back to scanning the prepared
+    // sets like the queues never existed. Ready nodes found here are rare;
+    // the scan keeps the queue optimization safe without changing behavior.
     for (const priority of [...Priority.values].reverse()) {
       if (priority.value < this.minProductionPriorityInner.value) {
         continue;
       }
 
-      const insertsReadyToProduce = [...this.preparedInsertNodesSet].filter(
-        (n) => n.isReadyToProduce && n.priority === priority,
+      const insertsReadyToProduce = this.readyNodesOfPriority(
+        this.preparedInsertNodesSet,
+        priority,
       );
 
       const nodesOfPriority =
         insertsReadyToProduce.length > 0
           ? insertsReadyToProduce
-          : [...this.preparedNodesSet].filter(
-              (n) => n.isReadyToProduce && n.priority === priority,
-            );
+          : this.readyNodesOfPriority(this.preparedNodesSet, priority);
 
       if (nodesOfPriority.length === 0) {
         continue;
       }
 
-      for (const node of [...nodesOfPriority]) {
-        this.removePreparedNode(node);
-
-        node.isTimedOut = false;
-        node.productionStartTime = this.stopwatch.elapsed;
-
-        assert(node.isReadyToProduce);
-
-        /* v8 ignore next -- defensive guard: a prepared node asserted ready is never disposed here */
-        if (!node.isDisposed) {
-          this.producingNodesSet.add(node);
-          node.produce();
-        }
-      }
-
-      // Process only nodes of one priority level per cycle.
+      this.produceBatch(nodesOfPriority);
       return;
     }
   }
 
-  private addPreparedNodes(nodes: readonly Node<any>[]): void {
-    if (nodes.length === 0) {
-      return;
-    }
+  /**
+   * Returns the nodes of the given set that are ready to produce with the
+   * given priority.
+   * @param nodes - The set of nodes to scan.
+   * @param priority - The priority to filter for.
+   */
+  private readyNodesOfPriority(
+    nodes: Set<Node<any>>,
+    priority: Priority,
+  ): Node<any>[] {
+    return [...nodes].filter(
+      (n) => n.isReadyToProduce && n.priority === priority,
+    );
+  }
 
+  /**
+   * Produces a batch of nodes of one priority level.
+   * @param batch - The nodes to produce.
+   */
+  private produceBatch(batch: readonly Node<any>[]): void {
+    for (const node of batch) {
+      // Remove node from preparedNodes
+      this.removePreparedNode(node);
+
+      // Reset timeout state
+      node.isTimedOut = false;
+      node.productionStartTime = this.stopwatch.elapsed;
+
+      assert(node.isReadyToProduce);
+
+      // Produce
+      /* v8 ignore next -- defensive guard: a prepared node asserted ready is never disposed here */
+      if (!node.isDisposed) {
+        // Add node to producing nodes
+        this.producingNodesSet.add(node);
+        node.produce();
+      }
+    }
+  }
+
+  /**
+   * Removes stale entries from the ready queues and moves entries whose
+   * priority changed since enqueueing into the queue of their current
+   * priority.
+   *
+   * A queue entry is stale when the node was disposed, left the prepared
+   * sets, or is no longer ready to produce (e.g. because a supplier was
+   * re-nominated). Nodes becoming ready again are re-enqueued by
+   * addPreparedNodes when their supplier finalizes.
+   */
+  private revalidateReadyQueues(): void {
+    this.revalidateReadyQueuesOfKind(
+      this.readyInsertNodes,
+      this.preparedInsertNodesSet,
+    );
+    this.revalidateReadyQueuesOfKind(this.readyNodes, this.preparedNodesSet);
+  }
+
+  private revalidateReadyQueuesOfKind(
+    queues: Set<Node<any>>[],
+    preparedNodes: Set<Node<any>>,
+  ): void {
+    for (let i = 0; i < queues.length; i++) {
+      const queue = queues[i];
+      if (queue.size === 0) {
+        continue;
+      }
+
+      let movedNodes: Node<any>[] | undefined;
+
+      for (const node of [...queue]) {
+        if (
+          node.isDisposed ||
+          !preparedNodes.has(node) ||
+          !node.isReadyToProduce
+        ) {
+          queue.delete(node);
+          continue;
+        }
+
+        if (node.priority.index !== i) {
+          (movedNodes ??= []).push(node);
+          queue.delete(node);
+        }
+      }
+
+      if (movedNodes !== undefined) {
+        for (const node of movedNodes) {
+          queues[node.priority.index].add(node);
+        }
+      }
+    }
+  }
+
+  private addPreparedNodes(nodes: readonly Node<any>[]): void {
     for (const node of nodes) {
       if (node.isInsert) {
         this.preparedInsertNodesSet.add(node);
       } else {
         this.preparedNodesSet.add(node);
       }
-    }
 
-    for (const node of nodes) {
-      if (node.priority === Priority.realtime) {
+      const priority = node.priority;
+
+      if (priority === Priority.realtime) {
         this.preparedRealtimeNodesSet.add(node);
+      }
+
+      // Nodes that are ready to produce are added to the matching ready
+      // queue. Nodes that are not ready yet will be re-added when their
+      // supplier finalizes production (finalizeProduction).
+      if (node.isReadyToProduce) {
+        const queues = node.isInsert ? this.readyInsertNodes : this.readyNodes;
+        queues[priority.index].add(node);
       }
     }
   }
@@ -929,7 +1105,18 @@ export class Scm {
     return this.testStopwatchInner;
   }
 
+  /**
+   * Starts an interval timer checking for production timeouts.
+   *
+   * If a check timer is already running it is reused. Previously a new
+   * periodic timer was created on every production cycle without
+   * cancelling the old one, leaking one timer per cycle.
+   */
   private startTimeoutCheck(): void {
+    if (this.timeoutCheckTimer !== undefined) {
+      return;
+    }
+
     const interval = Duration.milliseconds(
       Math.trunc(this.timeout.inMilliseconds / 2),
     );

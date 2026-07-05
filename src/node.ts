@@ -90,6 +90,10 @@ export class Node<T> {
     this._owner?.willDispose?.(this);
     this._isDisposed = true;
 
+    // Remove the node from the scm's prepared sets. Disposed nodes must not
+    // keep the production pipeline open.
+    this.scm.removeDisposedNode(this);
+
     // Supersede any in-flight asynchronous production so its late result is
     // discarded by [_onAsyncResult].
     this._produceGeneration++;
@@ -630,7 +634,7 @@ export class Node<T> {
    * @param newSuppliers - The new suppliers keyed by their key.
    */
   initSuppliers(newSuppliers: Map<string, Node<any>>): void {
-    this._detectCircularDependencies(this, [...newSuppliers.values()], [this]);
+    this._throwOnCircularDependencies(newSuppliers);
 
     // Make sure the keys match the blue print's suppliers
     const s = this.bluePrint.suppliers;
@@ -643,9 +647,10 @@ export class Node<T> {
       this._removeSupplier(supplier); // coverage:ignore-line
     }
 
-    // Reset old suppliers
+    // Add the new suppliers. All old suppliers were removed before, so each
+    // supplier is guaranteed to be new and no replacement lookup is needed.
     for (const supplier of newSuppliers.values()) {
-      this._addOrReplaceSupplier(supplier);
+      this._addNewSupplier(supplier);
     }
 
     // Enlarge or shrink _products
@@ -659,7 +664,7 @@ export class Node<T> {
 
   /** The customers of the node */
   get customers(): readonly Node<any>[] {
-    return this._customers;
+    return (this._customersArray ??= [...this._customers]);
   }
 
   /**
@@ -909,6 +914,7 @@ export class Node<T> {
   // ...........................................................................
   // Init & Dispose
   private _init(): void {
+    this._topoRank = this.scm.nextTopoRank();
     this._suppliersAreInitialized = this.bluePrint.suppliers.length === 0;
     this._initScope();
     this._initScm();
@@ -1074,29 +1080,50 @@ export class Node<T> {
   private _ownPriority: Priority = Priority.frame;
 
   // ...........................................................................
+  // _suppliers is an array because the order of the suppliers must match the
+  // order of the blue print's supplier paths (it defines the order of the
+  // components handed to produce). _suppliersSet shadows the array for O(1)
+  // contains checks.
   private readonly _suppliers: Supplier<any>[] = [];
-  private readonly _customers: Customer<any>[] = [];
+  private readonly _suppliersSet = new Set<Supplier<any>>();
+  private readonly _customers = new Set<Customer<any>>();
+
+  // Cached array view of _customers handed out by the customers getter.
+  // Invalidated on every mutation of _customers.
+  private _customersArray: Customer<any>[] | undefined;
 
   // ...........................................................................
-  private _addOrReplaceSupplier(supplier: Supplier<any>): void {
+  /**
+   * The node's position in a topological order of the supplier graph:
+   * suppliers have smaller ranks than their customers.
+   *
+   * Maintained incrementally (Pearce-Kelly): most edges connect a lower
+   * rank to a higher rank and cost O(1) to check for cycles. Only edges
+   * violating the current order trigger a search of the affected region
+   * plus a local rank reordering.
+   */
+  private _topoRank!: number;
+
+  // ...........................................................................
+  /**
+   * Adds a supplier that is guaranteed not to be one of the current
+   * suppliers, e.g. because all suppliers were removed before.
+   * @param supplier - The supplier to add.
+   */
+  private _addNewSupplier(supplier: Supplier<any>): void {
     assert((supplier as unknown) !== this);
 
     // Supplier<T> already added? Do nothing.
-    if (this._suppliers.includes(supplier)) {
+    if (this._suppliersSet.has(supplier)) {
       return;
     }
 
-    // Remove existing supplier
-    const path = this._supplierPath(supplier);
-    /* v8 ignore start -- supplier replacement path; the regular wiring never has a pre-existing supplier for the path */
-    const existingSupplier = this._supplierForPath(path);
-    if (existingSupplier != null) {
-      this._removeSupplier(existingSupplier);
-    }
-    /* v8 ignore stop */
+    // Keep the topological ranks in order
+    Node._restoreTopoOrderForEdge(supplier, this);
 
     // Add supplier to list of suppliers
     this._suppliers.push(supplier);
+    this._suppliersSet.add(supplier);
 
     // This producer becomes a customer of its supplier
     supplier._addCustomer(this);
@@ -1107,38 +1134,39 @@ export class Node<T> {
 
   // ...........................................................................
   private _removeSupplier(supplier: Supplier<any>): void {
-    if (!this._suppliers.includes(supplier)) {
+    if (!this._suppliersSet.has(supplier)) {
       return;
     }
 
     const index = this._suppliers.indexOf(supplier);
     this._suppliers.splice(index, 1);
+    this._suppliersSet.delete(supplier);
     assert(supplier.customers.includes(this));
     supplier._removeCustomer(this);
   }
 
   // ...........................................................................
+  /**
+   * Is called by [_addNewSupplier] after this node was added to the
+   * customer's supplier list.
+   * @param customer - The customer to add.
+   */
   private _addCustomer(customer: Customer<any>): void {
-    /* v8 ignore next -- guard: upstream _addOrReplaceSupplier prevents adding a duplicate customer */
-    if (this._customers.includes(customer)) {
-      return;
-    }
-
-    this._customers.push(customer);
-    customer._addOrReplaceSupplier(this);
+    this._customers.add(customer);
+    this._customersArray = undefined;
   }
 
   // ...........................................................................
   private _removeCustomer(customer: Customer<any>): void {
     /* v8 ignore next -- guard: upstream _removeSupplier only removes existing customers */
-    if (!this._customers.includes(customer)) {
+    if (!this._customers.has(customer)) {
       return;
     }
 
-    const index = this._customers.indexOf(customer);
-    this._customers.splice(index, 1);
+    this._customers.delete(customer);
+    this._customersArray = undefined;
     customer._removeSupplier(this);
-    if (this.isDisposed && this.customers.length === 0) {
+    if (this.isDisposed && this._customers.size === 0) {
       this._erase();
     }
   }
@@ -1181,18 +1209,18 @@ export class Node<T> {
   moveCustomersTo(targetNode: Node<T>): void {
     for (const customer of [...this.customers]) {
       // Move the customer to the smartNode
-
-      targetNode._customers.push(customer);
-      const customerIndex = this._customers.indexOf(customer);
-      /* v8 ignore next -- guard: the customer is always present in this._customers */
-      if (customerIndex !== -1) {
-        this._customers.splice(customerIndex, 1);
-      }
+      targetNode._customers.add(customer);
+      targetNode._customersArray = undefined;
+      this._customers.delete(customer);
+      this._customersArray = undefined;
 
       // Replace the old suppliers by the smartNode
       const supplierIndex = customer._suppliers.indexOf(this);
 
+      Node._restoreTopoOrderForEdge(targetNode, customer);
       customer._suppliers[supplierIndex] = targetNode;
+      customer._suppliersSet.delete(this);
+      customer._suppliersSet.add(targetNode);
       this.scm.nominate(customer);
     }
 
@@ -1225,32 +1253,6 @@ export class Node<T> {
   }
 
   // ...........................................................................
-  private _supplierPath(node: Node<any>): string {
-    const result: string[] = [];
-
-    for (const supplierPath of this.bluePrint.suppliers) {
-      if (node.matchesPath(supplierPath)) {
-        result.push(supplierPath);
-      }
-    }
-
-    assert(result.length === 1);
-
-    return result[0];
-  }
-
-  // ...........................................................................
-  private _supplierForPath(path: string): Node<any> | undefined {
-    for (const supplier of this.suppliers) {
-      /* v8 ignore next -- only reached via the supplier replacement path */
-      if (supplier.matchesPath(path)) {
-        return supplier;
-      }
-    }
-    return undefined;
-  }
-
-  // ...........................................................................
   private _clearSuppliers(): void {
     this._suppliersAreInitialized = this.bluePrint.suppliers.length === 0;
 
@@ -1264,7 +1266,167 @@ export class Node<T> {
   }
 
   // ...........................................................................
-  private _detectCircularDependencies(
+  /**
+   * Throws if connecting this node to the new suppliers would create a cycle.
+   *
+   * Thanks to the topological ranks this is O(1) per supplier for the
+   * common case (supplier rank smaller than customer rank). Only suppliers
+   * violating the current order require a reachability check, bounded to
+   * the affected rank region. Throws before any supplier is connected.
+   * @param newSuppliers - The new suppliers keyed by their key.
+   */
+  private _throwOnCircularDependencies(
+    newSuppliers: Map<string, Node<any>>,
+  ): void {
+    for (const supplier of newSuppliers.values()) {
+      // A supplier with a smaller rank can never close a cycle.
+      if (supplier._topoRank < this._topoRank) {
+        continue;
+      }
+
+      // The supplier is the node itself or reachable from the node via
+      // customer edges? Then the new edge would close a cycle.
+      if (
+        supplier === (this as unknown as Node<any>) ||
+        Node._isReachableViaCustomers({ from: this, target: supplier })
+      ) {
+        this._throwCircularDependency(this, [...newSuppliers.values()], [
+          this,
+        ]);
+      }
+    }
+  }
+
+  // ...........................................................................
+  /**
+   * Returns true if the target is reachable from the start node via customer
+   * edges.
+   *
+   * The search is bounded to the rank region `<= target._topoRank`: in a
+   * valid topological order every path towards the target has strictly
+   * increasing ranks.
+   * @param p - The start node and the target node.
+   */
+  private static _isReachableViaCustomers(p: {
+    from: Node<any>;
+    target: Node<any>;
+  }): boolean {
+    const { from, target } = p;
+    const maxRank = target._topoRank;
+    const visited = new Set<Node<any>>();
+    const stack: Node<any>[] = [from];
+
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      if (current === target) {
+        return true;
+      }
+      if (current._topoRank > maxRank || visited.has(current)) {
+        continue;
+      }
+      visited.add(current);
+      // Push one by one: spreading a large Set into push() exceeds V8's
+      // argument limit (~125k) and throws a RangeError on wide fan-outs.
+      for (const customer of current._customers) {
+        stack.push(customer);
+      }
+    }
+    return false;
+  }
+
+  // ...........................................................................
+  /**
+   * Restores the topological order before adding the edge from supplier
+   * to customer (Pearce-Kelly).
+   *
+   * When the edge already respects the order (supplier rank smaller than
+   * customer rank) this is O(1). Otherwise the affected rank region is searched and
+   * locally reordered. If the new edge closes a cycle no order exists; the
+   * ranks are left untouched (callers detect and report cycles themselves,
+   * see [_throwOnCircularDependencies]).
+   * @param supplier - The supplier side of the new edge.
+   * @param customer - The customer side of the new edge.
+   */
+  private static _restoreTopoOrderForEdge(
+    supplier: Node<any>,
+    customer: Node<any>,
+  ): void {
+    if (supplier._topoRank < customer._topoRank) {
+      return;
+    }
+
+    // Collect all nodes reachable forward from the customer within the
+    // affected region (they must move behind the supplier).
+    const maxRank = supplier._topoRank;
+    const forward = new Set<Node<any>>();
+    let stack: Node<any>[] = [customer];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      /* v8 ignore start -- defensive guard: initSuppliers rejects cycles
+         before any edge is added (_throwOnCircularDependencies), so the
+         forward walk never reaches the supplier there. Only kept for edge
+         producers like moveCustomersTo that add edges without a pre-check. */
+      if (current === supplier) {
+        // The new edge closes a cycle - no topological order exists.
+        return;
+      }
+      /* v8 ignore stop */
+      if (current._topoRank > maxRank || forward.has(current)) {
+        continue;
+      }
+      forward.add(current);
+      for (const customer of current._customers) {
+        stack.push(customer);
+      }
+    }
+
+    // Collect all nodes reaching the supplier backwards within the affected
+    // region (they must move before the customer's region).
+    const minRank = customer._topoRank;
+    const backward = new Set<Node<any>>();
+    stack = [supplier];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      if (current._topoRank < minRank || backward.has(current)) {
+        continue;
+      }
+      backward.add(current);
+      for (const supplier of current._suppliers) {
+        stack.push(supplier);
+      }
+    }
+
+    // Reassign the affected ranks: backward nodes keep their relative order
+    // and move before the forward nodes, which also keep theirs.
+    const pool = [
+      ...[...backward].map((node) => node._topoRank),
+      ...[...forward].map((node) => node._topoRank),
+    ].sort((a, b) => a - b);
+
+    const backwardSorted = [...backward].sort(
+      (a, b) => a._topoRank - b._topoRank,
+    );
+    const forwardSorted = [...forward].sort(
+      (a, b) => a._topoRank - b._topoRank,
+    );
+
+    let i = 0;
+    for (const node of backwardSorted) {
+      node._topoRank = pool[i++];
+    }
+    for (const node of forwardSorted) {
+      node._topoRank = pool[i++];
+    }
+  }
+
+  // ...........................................................................
+  /**
+   * Reconstructs the cycle path and throws. Only called on the error path.
+   * @param node - The node closing the cycle.
+   * @param suppliers - The suppliers to search through.
+   * @param visited - The path visited so far.
+   */
+  private _throwCircularDependency(
     node: Node<any>,
     suppliers: Iterable<Node<any>>,
     visited: Node<any>[],
@@ -1280,7 +1442,7 @@ export class Node<T> {
     }
 
     for (const supplier of suppliersArray) {
-      this._detectCircularDependencies(node, supplier.suppliers, [
+      this._throwCircularDependency(node, supplier.suppliers, [
         ...visited,
         supplier,
       ]);

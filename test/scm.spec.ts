@@ -1127,6 +1127,41 @@ describe('Scm', () => {
         expect(scm.producingNodes).not.toContain(node);
       });
     });
+
+    describe('produce fallback', () => {
+      it('should produce nodes that entered preparedNodes directly', () => {
+        // Nodes that enter the prepared sets without passing scm's
+        // bookkeeping (e.g. in tests adding to preparedNodesSet) are not
+        // part of the ready queues. The fallback scan in produce picks
+        // them up.
+        const scm = new Scm({ isTest: true });
+        const scope = Scope.root({ key: 'root', scm });
+
+        scope.mockContent({
+          supplier: 0,
+          customer: nbp({
+            from: ['supplier'],
+            to: 'customer',
+            init: 0,
+            produce: (c) => (c[0] as number) + 1,
+          }),
+        });
+        scm.flush();
+
+        const customer = scope.findNode<number>('customer')!;
+        expect(customer.product).toBe(1);
+
+        // Put the customer into preparedNodes bypassing the ready queues
+        customer.prepare();
+        (scm as any).preparedNodesSet.add(customer);
+
+        // Trigger production. The ready queues are empty, so only the
+        // fallback scan can find the node.
+        scm.flush();
+        expect(customer.isReady).toBe(true);
+        expect(scm.preparedNodes).not.toContain(customer);
+      });
+    });
   });
 
   it('Test with non test environment should work fine', async () => {
@@ -1511,6 +1546,58 @@ describe('Scm', () => {
       localScm.flush();
       await localScm.settle();
       expect(scope.findNode<number>('sourceSync')?.product).toBe(1);
+    });
+
+    it('does not start a timeout check timer when shouldTimeOut is false', () => {
+      const localScm = new Scm({ isTest: true });
+      const localScope = Scope.root({ key: 'root', scm: localScm });
+      localScm.shouldTimeOut = false;
+
+      localScope.mockContent({
+        supplier: 0,
+        customer: nbp({
+          from: ['supplier'],
+          to: 'customer',
+          init: 0,
+          produce: (c) => (c[0] as number) + 1,
+        }),
+      });
+      localScm.flush();
+
+      expect(localScope.findNode<number>('customer')!.product).toBe(1);
+      expect(localScm.testTimer).toBeUndefined();
+    });
+
+    it('produces insert nodes that entered preparedInsertNodes directly', () => {
+      // Like the 'produce fallback' test above, but for the insert queue:
+      // an insert bypassing scm's bookkeeping is only found by the
+      // fallback scan over preparedInsertNodes.
+      const localScm = new Scm({ isTest: true });
+      const localScope = Scope.root({ key: 'root', scm: localScm });
+
+      const host = new NodeBluePrint<number>({
+        key: 'host',
+        initialProduct: 1,
+      }).instantiate({ scope: localScope });
+
+      const insert = new NodeBluePrint<number>({
+        key: 'insert0',
+        initialProduct: 0,
+        produce: (components, previousProduct) => previousProduct * 10,
+      }).instantiateAsInsert({ host });
+
+      localScm.flush();
+      expect(host.product).toBe(10);
+
+      // Put the insert into preparedInsertNodes bypassing the ready queues
+      insert.prepare();
+      (localScm as any).preparedInsertNodesSet.add(insert);
+
+      // Trigger production. The ready queues are empty, so only the
+      // fallback scan over the insert set can find the node.
+      localScm.flush();
+      expect(insert.isReady).toBe(true);
+      expect((localScm as any).preparedInsertNodesSet.has(insert)).toBe(false);
     });
 
     it('skips the extra-erased assertion when extraChecks is disabled', () => {

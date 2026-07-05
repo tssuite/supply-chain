@@ -15,8 +15,10 @@ export class Disposed {
   /** The related supply chain manager. */
   readonly scm: Scm;
 
-  private readonly disposedScopes: Scope[] = [];
-  private readonly disposedNodes: Node<any>[] = [];
+  // Sets (insertion-ordered) instead of arrays: removeNode/removeScope are
+  // called once per erased item; with arrays each removal is a linear scan.
+  private readonly disposedScopes = new Set<Scope>();
+  private readonly disposedNodes = new Set<Node<any>>();
 
   /**
    * Constructor.
@@ -28,12 +30,12 @@ export class Disposed {
 
   /** Disposed scopes. */
   get scopes(): readonly Scope[] {
-    return this.disposedScopes;
+    return [...this.disposedScopes];
   }
 
   /** Disposed nodes. */
   get nodes(): readonly Node<any>[] {
-    return this.disposedNodes;
+    return [...this.disposedNodes];
   }
 
   /**
@@ -42,7 +44,7 @@ export class Disposed {
    */
   addNode(node: Node<any>): void {
     assert(node.isDisposed);
-    this.disposedNodes.push(node);
+    this.disposedNodes.add(node);
   }
 
   /**
@@ -50,10 +52,7 @@ export class Disposed {
    * @param node - The erased node.
    */
   removeNode(node: Node<any>): void {
-    const index = this.disposedNodes.indexOf(node);
-    if (index !== -1) {
-      this.disposedNodes.splice(index, 1);
-    }
+    this.disposedNodes.delete(node);
   }
 
   /**
@@ -62,7 +61,7 @@ export class Disposed {
    */
   addScope(scope: Scope): void {
     assert(scope.isDisposed);
-    this.disposedScopes.push(scope);
+    this.disposedScopes.add(scope);
   }
 
   /**
@@ -70,10 +69,7 @@ export class Disposed {
    * @param scope - The scope to remove.
    */
   removeScope(scope: Scope): void {
-    const index = this.disposedScopes.indexOf(scope);
-    if (index !== -1) {
-      this.disposedScopes.splice(index, 1);
-    }
+    this.disposedScopes.delete(scope);
   }
 
   /** Returns an example instance of this class. */

@@ -5,4 +5,4 @@
 // found in the LICENSE file in the root of this package.
 
 /** The current version of the supply-chain library. */
-export const version = '0.0.1';
+export const version = '0.1.0';

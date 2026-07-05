@@ -234,7 +234,7 @@ export class NodeBluePrint<T> {
   }): Node<T> {
     const applyScBuilders = options.applyScBuilders ?? true;
     this.check();
-    const existing = options.scope.nodes.find((n) => n.key === this.key);
+    const existing = options.scope.nodeByKey(this.key);
 
     if (existing !== undefined && !existing.isDisposed) {
       return existing as Node<T>;

@@ -5,6 +5,9 @@
   "homepage": "https://github.com/tssuite/supply-chain",
   "bugs": "https://github.com/tssuite/supply-chain/issues",
   "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT",
   "engines": {
     "node": ">=22.14.0"
@@ -20,9 +23,8 @@
   ],
   "type": "module",
   "scripts": {
-    "build": "vite build && tsc && node dna/scripts/copy-readme-to-dist.js",
+    "build": "pnpm run test && vite build && tsc && node dna/scripts/copy-readme-to-dist.js",
     "test": "npx vitest run --coverage && pnpm run lint",
-    "prebuild": "npm run test",
     "prepublishOnly": "npm run build",
     "lint": "eslint",
     "updateGoldens": "cross-env UPDATE_GOLDENS=true pnpm test"
