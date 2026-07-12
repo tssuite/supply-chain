@@ -97,7 +97,14 @@ export class Scm {
   /** Is used for testing. */
   isTest: boolean;
 
-  /** Disable additional checks. */
+  /**
+   * Disable additional checks.
+   *
+   * Performance note: with extraChecks enabled every announced
+   * production pays an extra containment check (see hasNewProduct).
+   * Set this to false in release builds of performance critical
+   * applications.
+   */
   static extraChecks = true;
 
   /** The root supply chain. */
@@ -108,6 +115,23 @@ export class Scm {
 
   /** Set to true if production timeouts should block. */
   shouldTimeOut = true;
+
+  /**
+   * Opt-in: process all production waves within a single scheduled cycle.
+   *
+   * By default the scm processes exactly one readiness wave (one priority
+   * batch) per event-loop cycle. This keeps intermediate states observable
+   * but pays one microtask hop per wave - noticeable on deep chains.
+   *
+   * With drainMode enabled, production keeps processing waves until no
+   * more nodes become ready (or an asynchronous producer is in flight).
+   * Deep chains then propagate within a single cycle.
+   *
+   * Trade-offs: intermediate one-wave-per-cycle states are no longer
+   * observable between event-loop cycles, and all synchronous waves of an
+   * update share one cycle - production timeouts still apply per node.
+   */
+  drainMode = false;
 
   /** Timeout interval: nodes must not use more than 5ms for production. */
   readonly timeout = Duration.milliseconds(5);
@@ -121,10 +145,21 @@ export class Scm {
 
   // Nodes
   private readonly nodesSet = new Set<Node<any>>();
+  private readonly nodesByKey = new Map<string, Set<Node<any>>>();
   private readonly animatedNodesSet = new Set<Node<any>>();
   private readonly nodesNeedingSupplierUpdate = new Set<Node<any>>();
   private readonly nodesWithMissedSuppliers = new Set<Node<any>>();
+
+  // Smart nodes, additionally indexed by the last segment of their smart
+  // master path. When a new node is created only the smart nodes whose
+  // master path ends with the node's key can connect to it - so only they
+  // need to be evaluated (see connectNewMasterNodeToPotentialSmartNodes).
   private readonly smartNodesSet = new Set<Node<any>>();
+  private readonly smartNodesByMasterKey = new Map<string, Set<Node<any>>>();
+  private readonly smartNodeMasterKeys = new Map<Node<any>, string>();
+
+  /** See {@link tickCount} */
+  private tickCountInner = 0;
 
   // Processing stages
   private readonly nominatedNodesSet = new Set<Node<any>>();
@@ -212,7 +247,23 @@ export class Scm {
    * @param key - The node key.
    */
   nodesWithKey<T>(key: string): readonly Node<T>[] {
-    return [...this.nodesSet].filter((n) => n.key === key) as Node<T>[];
+    const nodes = this.nodesByKey.get(key);
+    if (nodes === undefined) {
+      return [];
+    }
+    return [...nodes] as Node<T>[];
+  }
+
+  /**
+   * Returns true if at least one node with the given key exists.
+   *
+   * Used by Scope.findNode to fail fast: when no node with the searched
+   * key exists at all, the expensive search through the scope tree can be
+   * skipped.
+   * @param key - The node key.
+   */
+  hasNodesWithKey(key: string): boolean {
+    return this.nodesByKey.has(key);
   }
 
   /**
@@ -222,6 +273,14 @@ export class Scm {
   addNode(node: Node<any>): void {
     this.assertNodeIsNotErased(node);
     this.nodesSet.add(node);
+
+    let nodesWithSameKey = this.nodesByKey.get(node.key);
+    if (nodesWithSameKey === undefined) {
+      nodesWithSameKey = new Set<Node<any>>();
+      this.nodesByKey.set(node.key, nodesWithSameKey);
+    }
+    nodesWithSameKey.add(node);
+
     this.nominate(node);
   }
 
@@ -231,14 +290,25 @@ export class Scm {
    */
   removeNode(node: Node<any>): void {
     this.nodesSet.delete(node);
+
+    const nodesWithSameKey = this.nodesByKey.get(node.key);
+    if (nodesWithSameKey !== undefined) {
+      nodesWithSameKey.delete(node);
+      if (nodesWithSameKey.size === 0) {
+        this.nodesByKey.delete(node.key);
+      }
+    }
+
     this.animatedNodesSet.delete(node);
     this.nominatedNodesSet.delete(node);
     this.removePreparedNode(node);
     this.producingNodesSet.delete(node);
-    this.smartNodesSet.delete(node);
+    this.removeSmartNode(node);
     this.nodesWithMissedSuppliers.delete(node);
     this.nodesNeedingSupplierUpdate.delete(node);
     this.asyncProductions.delete(node);
+    this.nodesWithChangedPriority.delete(node);
+    this.readyQueuesNeedRevalidation = true;
   }
 
   /**
@@ -248,6 +318,7 @@ export class Scm {
    */
   removeDisposedNode(node: Node<any>): void {
     this.removePreparedNode(node);
+    this.readyQueuesNeedRevalidation = true;
   }
 
   /**
@@ -256,6 +327,7 @@ export class Scm {
    */
   needsInitSuppliers(node: Node<any>): void {
     this.nodesNeedingSupplierUpdate.add(node);
+    this.readyQueuesNeedRevalidation = true;
   }
 
   /**
@@ -292,10 +364,18 @@ export class Scm {
 
   /**
    * Inform scm about an update.
+   *
+   * With `propagate` set to false the node leaves the production pipeline
+   * cleanly, but its customers and inserts are not scheduled. Used by nodes
+   * configured with NodeBluePrint.propagateOnChangeOnly when a freshly
+   * produced product equals the previously propagated one.
    * @param node - The node with a new product.
-   * @param options - Optional extra-checks override.
+   * @param options - Optional extra-checks override and propagate flag.
    */
-  hasNewProduct(node: Node<any>, options: { extraChecks?: boolean } = {}): void {
+  hasNewProduct(
+    node: Node<any>,
+    options: { extraChecks?: boolean; propagate?: boolean } = {},
+  ): void {
     const check = options.extraChecks ?? Scm.extraChecks;
     if (check && !this.producingNodesSet.has(node)) {
       throw new StateError(
@@ -303,7 +383,7 @@ export class Scm {
           'without being nominated before.',
       );
     }
-    this.finalizeProduction(node);
+    this.finalizeProduction(node, { propagate: options.propagate ?? true });
   }
 
   // ...........................................................................
@@ -386,6 +466,18 @@ export class Scm {
     this.tickInternal();
   }
 
+  /**
+   * Monotonic counter of the ticks that nominated the animated nodes.
+   *
+   * AnimatedNode compares it against the value seen at its previous
+   * production to decide whether a production is tick-driven (advance one
+   * frame) or was triggered by a supplier re-emission between ticks (do
+   * not consume a frame).
+   */
+  get tickCount(): number {
+    return this.tickCountInner;
+  }
+
   // ...........................................................................
   // Product life cycle
 
@@ -412,7 +504,8 @@ export class Scm {
    * @param node - The node whose priority changed.
    */
   priorityHasChanged(node: Node<any>): void {
-    void node;
+    this.nodesWithChangedPriority.add(node);
+    this.readyQueuesNeedRevalidation = true;
     this.schedulePriorityUpdate.trigger();
   }
 
@@ -669,7 +762,10 @@ export class Scm {
       return;
     }
 
-    // Nominate all animated nodes
+    // Nominate all animated nodes. The counter lets animated nodes
+    // distinguish tick-driven productions from productions triggered by a
+    // supplier re-emission between ticks (see AnimatedNode.advance).
+    this.tickCountInner++;
     for (const node of this.animatedNodesSet) {
       this.nominatedNodesSet.add(node);
     }
@@ -731,6 +827,9 @@ export class Scm {
   // Preparation
 
   private prepare(): void {
+    // Staging nodes can make queued customers unready
+    this.readyQueuesNeedRevalidation = true;
+
     if (
       this.nodesNeedingSupplierUpdate.size > 0 ||
       this.nodesWithMissedSuppliers.size > 0
@@ -837,6 +936,28 @@ export class Scm {
     // since they became ready into the right queue.
     this.revalidateReadyQueues();
 
+    let produced = this.produceNextBatch();
+
+    // In drain mode all waves becoming ready are processed within this
+    // cycle instead of scheduling one event-loop task per wave.
+    while (
+      this.drainMode &&
+      produced &&
+      this.producingNodesSet.size === 0 &&
+      !this.preparedNodesAreEmpty
+    ) {
+      produced = this.produceNextBatch();
+    }
+  }
+
+  /**
+   * Produces the next batch of ready nodes.
+   *
+   * Processes only nodes of one priority level, making sure that all nodes
+   * of a given priority are processed before the others start. Returns
+   * true if a batch was produced.
+   */
+  private produceNextBatch(): boolean {
     // Process nodes grouped by priority
     for (const priority of [...Priority.values].reverse()) {
       // Don't process priorities below minimum production priority
@@ -858,11 +979,7 @@ export class Scm {
       const batch = [...queue];
       queue.clear();
       this.produceBatch(batch);
-
-      // We process only nodes of one priority level in a cycle.
-      // Thus we are making sure that all nodes of a given priority are
-      // processed before the others start.
-      return;
+      return true;
     }
 
     // Fallback: The queues are empty, but prepared nodes exist. This happens
@@ -890,8 +1007,10 @@ export class Scm {
       }
 
       this.produceBatch(nodesOfPriority);
-      return;
+      return true;
     }
+
+    return false;
   }
 
   /**
@@ -915,6 +1034,16 @@ export class Scm {
    */
   private produceBatch(batch: readonly Node<any>[]): void {
     for (const node of batch) {
+      // Disposed nodes must not produce. Remove them from the prepared
+      // sets - otherwise they would keep the production pipeline open.
+      // Nodes can be disposed while their own batch is producing.
+      /* v8 ignore start -- defensive guard: requires disposal mid-batch */
+      if (node.isDisposed) {
+        this.removePreparedNode(node);
+        continue;
+      }
+      /* v8 ignore stop */
+
       // Remove node from preparedNodes
       this.removePreparedNode(node);
 
@@ -924,13 +1053,9 @@ export class Scm {
 
       assert(node.isReadyToProduce);
 
-      // Produce
-      /* v8 ignore next -- defensive guard: a prepared node asserted ready is never disposed here */
-      if (!node.isDisposed) {
-        // Add node to producing nodes
-        this.producingNodesSet.add(node);
-        node.produce();
-      }
+      // Add node to producing nodes
+      this.producingNodesSet.add(node);
+      node.produce();
     }
   }
 
@@ -945,12 +1070,28 @@ export class Scm {
    * addPreparedNodes when their supplier finalizes.
    */
   private revalidateReadyQueues(): void {
+    // Only revalidate when something happened that can invalidate queue
+    // entries (see readyQueuesNeedRevalidation call sites). produceBatch
+    // additionally re-checks every node before producing it.
+    if (!this.readyQueuesNeedRevalidation) {
+      return;
+    }
+    this.readyQueuesNeedRevalidation = false;
+
     this.revalidateReadyQueuesOfKind(
       this.readyInsertNodes,
       this.preparedInsertNodesSet,
     );
     this.revalidateReadyQueuesOfKind(this.readyNodes, this.preparedNodesSet);
   }
+
+  /**
+   * Set to true whenever an event occurs that can make ready queue entries
+   * stale: preparing nodes (stages suppliers of queued nodes), priority
+   * changes (queue assignment), disposals and removals from the prepared
+   * sets, and supplier re-initializations.
+   */
+  private readyQueuesNeedRevalidation = true;
 
   private revalidateReadyQueuesOfKind(
     queues: Set<Node<any>>[],
@@ -990,6 +1131,11 @@ export class Scm {
 
   private addPreparedNodes(nodes: readonly Node<any>[]): void {
     for (const node of nodes) {
+      // Disposed nodes can never produce
+      if (node.isDisposed) {
+        continue;
+      }
+
       if (node.isInsert) {
         this.preparedInsertNodesSet.add(node);
       } else {
@@ -1013,10 +1159,18 @@ export class Scm {
   }
 
   private removePreparedNode(node: Node<any>): void {
+    // Also drop the node's ready queue entry. Otherwise a node re-enqueued
+    // while its batch is still producing (e.g. an insert whose input
+    // finalizes mid-batch) would keep a stale entry and produce twice.
+    // Entries queued under an outdated priority are cleaned up by
+    // revalidateReadyQueues (priority changes set
+    // readyQueuesNeedRevalidation).
     if (node.isInsert) {
       this.preparedInsertNodesSet.delete(node);
+      this.readyInsertNodes[node.priority.index].delete(node);
     } else {
       this.preparedNodesSet.delete(node);
+      this.readyNodes[node.priority.index].delete(node);
     }
 
     if (node.priority === Priority.realtime) {
@@ -1024,12 +1178,36 @@ export class Scm {
     }
   }
 
-  private finalizeProduction(node: Node<any>): void {
+  private finalizeProduction(
+    node: Node<any>,
+    options: { propagate?: boolean } = {},
+  ): void {
+    const propagate = options.propagate ?? true;
+
+    // Remove node from producing nodes
     this.producingNodesSet.delete(node);
+
+    // Reset production state
     node.finalizeProduction();
-    this.addPreparedNodes(node.inserts);
-    this.addPreparedNodes(node.customers);
-    this.finalizeInsert(node);
+
+    if (propagate) {
+      // Inserts now need to produce
+      this.addPreparedNodes(node.inserts);
+
+      // Customers now need to produce
+      this.addPreparedNodes(node.customers);
+
+      // If node is a insert
+      this.finalizeInsert(node);
+    } else {
+      // The production wave ends here. prepareNode staged the node's
+      // transitive customers before this production; un-stage every one
+      // that no other pending wave will produce. Otherwise they would
+      // stay staged forever and block every future wave running through
+      // them (their customers would never become isReadyToProduce).
+      this.unstageSkippedNodes(node);
+    }
+
     this.scheduleProduction();
 
     if (this.preparedNodesAreEmpty) {
@@ -1039,6 +1217,58 @@ export class Scm {
     if (this.preparedNodesAreEmpty) {
       this.resetMinimumProductionPriority();
       this.stopTimeoutCheck();
+    }
+  }
+
+  /**
+   * Un-stages the transitive customers of `node` that were staged for the
+   * wave ending at `node` and that no other pending wave will finalize.
+   *
+   * Mirrors the traversal of prepareNode. Nodes that are nominated,
+   * prepared or producing are owed a production by another wave which will
+   * finalize (and thereby un-stage) them - those are left untouched.
+   * @param node - The node whose wave ends here.
+   */
+  private unstageSkippedNodes(node: Node<any>): void {
+    const stack: Node<any>[] = [...node.inserts, ...node.customers];
+    let unstagedNodes = false;
+
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+
+      if (!current.isStaged) {
+        continue;
+      }
+
+      // Owed a production by another pending wave? Leave it staged.
+      if (
+        this.nominatedNodesSet.has(current) ||
+        this.preparedNodesSet.has(current) ||
+        this.preparedInsertNodesSet.has(current) ||
+        this.producingNodesSet.has(current)
+      ) {
+        continue;
+      }
+
+      current.finalizeProduction();
+      unstagedNodes = true;
+
+      for (const insert of current.inserts) {
+        stack.push(insert);
+      }
+
+      if (current.isInsert) {
+        this.prepareInsert(current as unknown as Insert<any>, stack);
+      }
+
+      for (const customer of current.customers) {
+        stack.push(customer);
+      }
+    }
+
+    // Un-staging changes readiness of already queued nodes
+    if (unstagedNodes) {
+      this.readyQueuesNeedRevalidation = true;
     }
   }
 
@@ -1060,34 +1290,92 @@ export class Scm {
     this.minProductionPriorityInner = Priority.realtime;
   }
 
+  /** Nodes whose priority changed since the last priority update */
+  private readonly nodesWithChangedPriority = new Set<Node<any>>();
+
+  /**
+   * Update priorities of all nodes affected by a priority change.
+   *
+   * A node's priority can only affect its transitive suppliers (they take
+   * over the highest customer priority). So instead of resetting and
+   * recomputing the whole graph, only the supplier cone of the changed
+   * nodes is invalidated and recomputed.
+   */
   private updatePriorities(): void {
-    this.resetPriorities();
-    for (const node of this.nodesSet) {
+    if (this.nodesWithChangedPriority.size === 0) {
+      return;
+    }
+
+    // Collect the supplier cone of all changed nodes
+    const cone = new Set<Node<any>>();
+    const stack: Node<any>[] = [...this.nodesWithChangedPriority];
+    this.nodesWithChangedPriority.clear();
+
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+      if (cone.has(node)) {
+        continue;
+      }
+      cone.add(node);
+      for (const supplier of node.suppliers) {
+        stack.push(supplier);
+      }
+    }
+
+    // Reset the assigned priorities within the cone
+    for (const node of cone) {
+      node.customerPriority = undefined;
+    }
+
+    // Recompute the priorities within the cone. Nodes outside the cone
+    // keep their values - they cannot be affected by the change.
+    for (const node of cone) {
       this.updatePriorityForNode(node);
     }
   }
 
-  private resetPriorities(): void {
-    for (const node of this.nodesSet) {
-      node.customerPriority = undefined;
-    }
-  }
+  /**
+   * Update the priority of `root` from its customers' priorities.
+   *
+   * Iterative with an explicit stack: the recursion depth would equal the
+   * customer chain length and overflow on deep chains. Customers without a
+   * computed priority are computed on demand; already computed customers
+   * (customerPriority !== undefined) are taken as is.
+   * @param root - The node whose priority should be updated.
+   */
+  private updatePriorityForNode(root: Node<any>): void {
+    const stack: Node<any>[] = [root];
 
-  private updatePriorityForNode(node: Node<any>): void {
-    if (node.customerPriority !== undefined) {
-      return;
-    }
+    while (stack.length > 0) {
+      const node = stack[stack.length - 1];
 
-    let highestChildPriority = Priority.lowest;
+      // Has already a priority? Return.
+      if (node.customerPriority !== undefined) {
+        stack.pop();
+        continue;
+      }
 
-    for (const customer of node.customers) {
-      this.updatePriorityForNode(customer);
-      if (customer.priority.value > highestChildPriority.value) {
-        highestChildPriority = customer.priority;
+      // Update priority for customers first
+      let allCustomersComputed = true;
+      let highestChildPriority = Priority.lowest;
+
+      for (const customer of node.customers) {
+        if (customer.customerPriority === undefined) {
+          stack.push(customer);
+          allCustomersComputed = false;
+        }
+        // Take over highest priority
+        else if (customer.priority.value > highestChildPriority.value) {
+          highestChildPriority = customer.priority;
+        }
+      }
+
+      // Assign highest priority to itself
+      if (allCustomersComputed) {
+        node.customerPriority = highestChildPriority;
+        stack.pop();
       }
     }
-
-    node.customerPriority = highestChildPriority;
   }
 
   // ...........................................................................
@@ -1218,7 +1506,14 @@ export class Scm {
   private connectNewMasterNodeToPotentialSmartNodes(
     newMaster: Node<any>,
   ): void {
-    for (const smartNode of this.smartNodesSet) {
+    // Only smart nodes whose master path ends with the new master's key
+    // can connect to it.
+    const smartNodes = this.smartNodesByMasterKey.get(newMaster.key);
+    if (smartNodes === undefined) {
+      return;
+    }
+
+    for (const smartNode of [...smartNodes]) {
       this.connectNewSmartNodeToPotentialMasters(smartNode, {
         newPotentialMaster: newMaster,
       });
@@ -1227,16 +1522,62 @@ export class Scm {
 
   private updateSmartNodesInternal(node: Node<any>): void {
     if (node.isSmartNode) {
+      // Add the node to list of smartNodes.
       if (node.isDisposed) {
-        this.smartNodesSet.delete(node);
+        this.removeSmartNode(node);
         return;
       }
 
-      this.smartNodesSet.add(node);
+      this.addSmartNode(node);
       this.connectNewSmartNodeToPotentialMasters(node);
       return;
     }
 
     this.connectNewMasterNodeToPotentialSmartNodes(node);
+  }
+
+  private addSmartNode(node: Node<any>): void {
+    const masterKey = node.smartMaster[node.smartMaster.length - 1];
+    const previousMasterKey = this.smartNodeMasterKeys.get(node);
+
+    // Already registered under the same master key? Do nothing.
+    if (previousMasterKey === masterKey) {
+      return;
+    }
+
+    // The smart master path may have changed - remove the old registration
+    /* v8 ignore next 3 -- defensive: a smart node's master path never changes in place */
+    if (previousMasterKey !== undefined) {
+      this.removeSmartNode(node);
+    }
+
+    this.smartNodesSet.add(node);
+    this.smartNodeMasterKeys.set(node, masterKey);
+
+    let nodesWithMasterKey = this.smartNodesByMasterKey.get(masterKey);
+    if (nodesWithMasterKey === undefined) {
+      nodesWithMasterKey = new Set<Node<any>>();
+      this.smartNodesByMasterKey.set(masterKey, nodesWithMasterKey);
+    }
+    nodesWithMasterKey.add(node);
+  }
+
+  private removeSmartNode(node: Node<any>): void {
+    const masterKey = this.smartNodeMasterKeys.get(node);
+    if (masterKey === undefined) {
+      return;
+    }
+    this.smartNodeMasterKeys.delete(node);
+
+    this.smartNodesSet.delete(node);
+
+    // The two maps are kept in sync by addSmartNode: a node with a master
+    // key entry always has a bucket in smartNodesByMasterKey.
+    /* v8 ignore next -- defensive guard, see comment above */
+    const nodesWithMasterKey = this.smartNodesByMasterKey.get(masterKey) ?? new Set<Node<any>>();
+    nodesWithMasterKey.delete(node);
+    if (nodesWithMasterKey.size === 0) {
+      this.smartNodesByMasterKey.delete(masterKey);
+    }
   }
 }

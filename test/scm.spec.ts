@@ -297,6 +297,17 @@ describe('Scm', () => {
       });
     });
 
+    it('should increase tickCount with every tick', () => {
+      const scope = Scope.example();
+      const scm = scope.scm;
+      scm.flush(); // drain - a busy pipeline defers the tick
+      const before = scm.tickCount;
+      scm.tick();
+      expect(scm.tickCount).toBe(before + 1);
+      scm.tick();
+      expect(scm.tickCount).toBe(before + 2);
+    });
+
     it('should animate correctly', () => {
       // Create a chain, containing a supplier, a producer and a customer
       const scope = Scope.example();
@@ -1613,5 +1624,537 @@ describe('Scm', () => {
         Scm.extraChecks = previous;
       }
     });
+  });
+
+  describe('drainMode', () => {
+    it('should process all waves within a single production cycle', () => {
+      const scm = new Scm({ isTest: true });
+      scm.drainMode = true;
+      const scope = Scope.root({ key: 'root', scm });
+
+      scope.mockContent({
+        supplier: 0,
+        middle: nbp({
+          from: ['supplier'],
+          to: 'middle',
+          init: 0,
+          produce: (c) => (c[0] as number) + 1,
+        }),
+        customer: nbp({
+          from: ['middle'],
+          to: 'customer',
+          init: 0,
+          produce: (c) => (c[0] as number) + 1,
+        }),
+      });
+      scm.flush();
+
+      const supplier = scope.findNode<number>('supplier')!;
+      const customer = scope.findNode<number>('customer')!;
+      expect(customer.product).toBe(2);
+
+      // Nominate the supplier and prepare the chain
+      supplier.product = 10;
+      scm.testRunFastTasks();
+      scm.tick();
+
+      // Without drainMode this would take one production cycle per
+      // wave (supplier, middle, customer). With drainMode a single
+      // cycle propagates the whole chain.
+      scm.testRunNormalTasks();
+      expect(customer.product).toBe(12);
+    });
+  });
+
+  describe('incremental priority updates', () => {
+    it('should handle multiple changed nodes in one cycle', () => {
+      const scm = new Scm({ isTest: true });
+      const scope = Scope.root({ key: 'root', scm });
+
+      scope.mockContent({
+        supplier: 0,
+        customer: nbp({
+          from: ['supplier'],
+          to: 'customer',
+          init: 0,
+          produce: (c) => (c[0] as number) + 1,
+        }),
+      });
+      scm.flush();
+
+      const supplier = scope.findNode<number>('supplier')!;
+      const customer = scope.findNode<number>('customer')!;
+
+      // Change the priorities of both chain members in the same cycle.
+      // The supplier's recompute also computes the customer; the
+      // customer's own recompute then finds it already up to date.
+      customer.ownPriority = Priority.frame;
+      supplier.ownPriority = Priority.realtime;
+      scm.testRunFastTasks();
+
+      expect(supplier.priority).toBe(Priority.realtime);
+      expect(customer.priority).toBe(Priority.frame);
+
+      scm.flush();
+    });
+  });
+
+  describe('produce', () => {
+    it('should skip nodes disposed while their batch is producing', () => {
+      const scm = new Scm({ isTest: true });
+      const scope = Scope.root({ key: 'root', scm });
+
+      scope.mockContent({
+        supplier: 0,
+        c1: nbp({
+          from: ['supplier'],
+          to: 'c1',
+          init: 0,
+          produce: (c, _p, n) => {
+            // Dispose the sibling customer. It is part of the same
+            // production batch and must be skipped and removed from
+            // the prepared nodes.
+            n.scope.findNode<number>('c2')?.dispose();
+            return (c[0] as number) + 1;
+          },
+        }),
+        c2: nbp({
+          from: ['supplier'],
+          to: 'c2',
+          init: 0,
+          produce: (c) => (c[0] as number) + 1,
+        }),
+      });
+      scm.flush();
+
+      // c2 was disposed by c1's produce and erased (no customers)
+      expect(scope.findNode<number>('c2')).toBeUndefined();
+
+      const c1 = scope.findNode<number>('c1')!;
+      expect(c1.product).toBe(1);
+
+      // Updates keep working
+      const supplier = scope.findNode<number>('supplier')!;
+      supplier.product = 5;
+      scm.flush();
+      expect(c1.product).toBe(6);
+    });
+  });
+
+  // ...........................................................................
+  describe('finalize without propagation (change-gating)', () => {
+    it('lets a change-gated node settle without waking its customers', () => {
+      const scm = new Scm({ isTest: true });
+      const scope = Scope.example({ scm });
+      scope.mockContent({
+        a: 5,
+        gated: new NodeBluePrint<number>({
+          key: 'gated',
+          initialProduct: 0,
+          suppliers: ['a'],
+          produce: (c) => Math.min(Math.max(c[0] as number, 0), 10),
+          propagateOnChangeOnly: true,
+        }),
+        counter: nbp({
+          from: ['gated'],
+          to: 'counter',
+          init: 0,
+          produce: (_c, p: number) => p + 1,
+        }),
+      });
+      const a = scope.findNode<number>('a')!;
+      const gated = scope.findNode<number>('gated')!;
+      const counter = scope.findNode<number>('counter')!;
+      scm.flush();
+      const produced = counter.product;
+
+      // 'gated' clamps 5 -> 5 (unchanged): finalized without propagation.
+      a.product = 5;
+      scm.flush();
+      expect(counter.product).toBe(produced);
+      expect(gated.isStaged).toBe(false);
+      expect(scm.nominatedNodes).toHaveLength(0);
+
+      // The skipped customers must not stay staged either - a staged
+      // customer would block every future wave running through it.
+      expect(counter.isStaged).toBe(false);
+    });
+
+    it('un-stages skipped customers including their inserts', () => {
+      const scm = new Scm({ isTest: true });
+      const scope = Scope.example({ scm });
+      scope.mockContent({
+        a: 5,
+        gated: new NodeBluePrint<number>({
+          key: 'gated',
+          initialProduct: 0,
+          suppliers: ['a'],
+          produce: (c) => Math.min(Math.max(c[0] as number, 0), 10),
+          propagateOnChangeOnly: true,
+        }),
+        counter: nbp({
+          from: ['gated'],
+          to: 'counter',
+          init: 0,
+          produce: (c) => c[0] as number,
+        }),
+      });
+      const a = scope.findNode<number>('a')!;
+      const counter = scope.findNode<number>('counter')!;
+
+      // Give the skipped customer an insert - it is staged with the wave
+      // and must be un-staged with it too.
+      const insert = new NodeBluePrint<number>({
+        key: 'insert0',
+        initialProduct: 0,
+        produce: (_c, p: number) => p * 10,
+      }).instantiateAsInsert({ host: counter });
+      scm.flush();
+
+      // 'gated' clamps 5 -> 5 (unchanged): the wave ends at 'gated'.
+      a.product = 5;
+      scm.flush();
+      expect(counter.isStaged).toBe(false);
+      expect(insert.isStaged).toBe(false);
+    });
+
+    it('does not stall customers reachable through a second supplier', () => {
+      const scm = new Scm({ isTest: true });
+      const scope = Scope.example({ scm });
+      scope.mockContent({
+        a: 5,
+        x: 0,
+        gated: new NodeBluePrint<number>({
+          key: 'gated',
+          initialProduct: 0,
+          suppliers: ['a'],
+          produce: (c) => Math.min(Math.max(c[0] as number, 0), 10),
+          propagateOnChangeOnly: true,
+        }),
+        counter: nbp({
+          from: ['gated'],
+          to: 'counter',
+          init: 0,
+          produce: (c) => c[0] as number,
+        }),
+        sink: nbp({
+          from: ['counter', 'x'],
+          to: 'sink',
+          init: 0,
+          produce: (c) => (c[0] as number) + (c[c.length - 1] as number),
+        }),
+      });
+      const a = scope.findNode<number>('a')!;
+      const x = scope.findNode<number>('x')!;
+      const counter = scope.findNode<number>('counter')!;
+      const sink = scope.findNode<number>('sink')!;
+      scm.flush();
+
+      // A gated wave: 'gated' clamps 5 -> 5 (unchanged).
+      a.product = 5;
+      scm.flush();
+      expect(counter.isStaged).toBe(false);
+      expect(sink.isStaged).toBe(false);
+
+      // A later wave through the second supplier must reach 'sink'.
+      // Before the fix, 'counter' and 'sink' stayed staged forever and
+      // this flush spun without ever producing 'sink'.
+      x.product = 100;
+      scm.flush();
+      expect(sink.product).toBe(5 + 100);
+    });
+
+    it('visits diamond-shaped customer cones only once', () => {
+      const scm = new Scm({ isTest: true });
+      const scope = Scope.example({ scm });
+      scope.mockContent({
+        a: 5,
+        gated: new NodeBluePrint<number>({
+          key: 'gated',
+          initialProduct: 0,
+          suppliers: ['a'],
+          produce: (c) => Math.min(Math.max(c[0] as number, 0), 10),
+          propagateOnChangeOnly: true,
+        }),
+        c1: nbp({
+          from: ['gated'],
+          to: 'c1',
+          init: 0,
+          produce: (c) => c[0] as number,
+        }),
+        c2: nbp({
+          from: ['gated'],
+          to: 'c2',
+          init: 0,
+          produce: (c) => c[0] as number,
+        }),
+        sink: nbp({
+          from: ['c1', 'c2'],
+          to: 'sink',
+          init: 0,
+          produce: (c) => (c[0] as number) + (c[c.length - 1] as number),
+        }),
+      });
+      const a = scope.findNode<number>('a')!;
+      const sink = scope.findNode<number>('sink')!;
+      scm.flush();
+
+      // The wave ends at 'gated'. 'sink' is reachable via both 'c1' and
+      // 'c2' - the un-stage traversal visits it twice and must skip the
+      // already un-staged second visit.
+      a.product = 5;
+      scm.flush();
+      expect(sink.isStaged).toBe(false);
+
+      // Everything keeps working afterwards.
+      a.product = 8;
+      scm.flush();
+      expect(sink.product).toBe(16);
+    });
+
+    it('leaves customers staged that are owed a production by another wave', () => {
+      const scm = new Scm({ isTest: true });
+      const scope = Scope.example({ scm });
+      scope.mockContent({
+        a: 5,
+        x: 0,
+        gated: new NodeBluePrint<number>({
+          key: 'gated',
+          initialProduct: 0,
+          suppliers: ['a'],
+          produce: (c) => Math.min(Math.max(c[0] as number, 0), 10),
+          propagateOnChangeOnly: true,
+        }),
+        counter: nbp({
+          from: ['gated'],
+          to: 'counter',
+          init: 0,
+          produce: (c) => c[0] as number,
+        }),
+        sink: nbp({
+          from: ['counter', 'x'],
+          to: 'sink',
+          init: 0,
+          produce: (c) => (c[0] as number) + (c[c.length - 1] as number),
+        }),
+      });
+      const a = scope.findNode<number>('a')!;
+      const x = scope.findNode<number>('x')!;
+      const sink = scope.findNode<number>('sink')!;
+      scm.flush();
+
+      // Both waves start in the same cycle. When 'gated' finalizes without
+      // propagation, 'sink' is already owed a production by 'x's wave (it
+      // sits in the prepared set) and must be left staged so that wave can
+      // finalize it.
+      a.product = 5;
+      x.product = 100;
+      scm.flush();
+      expect(sink.product).toBe(5 + 100);
+      expect(sink.isStaged).toBe(false);
+    });
+
+    it('leaves customers staged that were re-nominated during the wave', () => {
+      const scm = new Scm({ isTest: true });
+      const scope = Scope.example({ scm });
+      let nominateNow = false;
+      scope.mockContent({
+        a: 5,
+        gated: new NodeBluePrint<number>({
+          key: 'gated',
+          initialProduct: 0,
+          suppliers: ['a'],
+          produce: (c, _p, n) => {
+            if (nominateNow) {
+              nominateNow = false;
+              // Nominate the (writable) customer while its wave produces.
+              n.scope.findNode<number>('counter')!.product = 123;
+            }
+            return Math.min(Math.max(c[0] as number, 0), 10);
+          },
+          propagateOnChangeOnly: true,
+        }),
+        counter: new NodeBluePrint<number>({
+          key: 'counter',
+          initialProduct: 0,
+          suppliers: ['gated'],
+        }),
+      });
+      const a = scope.findNode<number>('a')!;
+      const counter = scope.findNode<number>('counter')!;
+      scm.flush();
+
+      // 'gated' clamps 5 -> 5 (unchanged) and nominates 'counter' inside
+      // its produce. The un-stage traversal must leave 'counter' staged -
+      // the nomination owes it a production which delivers the write.
+      nominateNow = true;
+      a.product = 5;
+      scm.flush();
+      expect(counter.product).toBe(123);
+      expect(counter.isStaged).toBe(false);
+    });
+  });
+
+  describe('updatePriorities', () => {
+    it('returns early when all changed nodes were removed meanwhile', () => {
+      const scm = new Scm({ isTest: true });
+      const scope = Scope.root({ key: 'root', scm });
+      const node = nbp({ from: [], to: 'solo', init: 0 }).instantiate({
+        scope,
+      });
+      scm.flush();
+
+      // The priority change schedules an update; disposing the node erases
+      // it and clears the changed set before the update runs.
+      node.ownPriority = Priority.realtime;
+      node.dispose();
+      scm.testRunFastTasks();
+      expect(node.isErased).toBe(true);
+    });
+  });
+
+  describe('removeNode', () => {
+    it('keeps the key index intact when other nodes share the key', () => {
+      const scm = new Scm({ isTest: true });
+      const scope = Scope.example({ scm });
+      scope.mockContent({
+        childA: { twin: 1 },
+        childB: { twin: 2 },
+      });
+      const twinA = scope.findChildScope('childA')!.node<number>('twin')!;
+      const twinB = scope.findChildScope('childB')!.node<number>('twin')!;
+      scm.flush();
+
+      // Removing the first twin keeps the second one findable.
+      twinA.dispose();
+      expect(scm.nodesWithKey<number>('twin')).toEqual([twinB]);
+      expect(scm.hasNodesWithKey('twin')).toBe(true);
+
+      // Removing the second twin empties the index.
+      twinB.dispose();
+      expect(scm.hasNodesWithKey('twin')).toBe(false);
+
+      // A second removal of an already removed node is a no-op.
+      scm.removeNode(twinB);
+      expect(scm.hasNodesWithKey('twin')).toBe(false);
+    });
+  });
+
+  describe('smart node master key index', () => {
+    it('keeps other smart nodes with the same master key when one is removed', () => {
+      const scm = new Scm({ isTest: true });
+      const scope = Scope.example({ scm });
+      scope.mockContent({
+        childA: {
+          height: new NodeBluePrint<number>({
+            key: 'height',
+            initialProduct: 1,
+            smartMaster: ['master', 'height'],
+          }),
+        },
+        childB: {
+          height: new NodeBluePrint<number>({
+            key: 'height',
+            initialProduct: 2,
+            smartMaster: ['master', 'height'],
+          }),
+        },
+      });
+      const smartA = scope.findChildScope('childA')!.node<number>('height')!;
+      const smartB = scope.findChildScope('childB')!.node<number>('height')!;
+      scm.flush();
+
+      // Remove the first smart node - the second one must stay connected
+      // to the master key index and pick up a master appearing later.
+      smartA.dispose();
+      scm.flush();
+
+      scope.mockContent({ master: { height: 42 } });
+      scm.flush();
+      expect(smartB.product).toBe(42);
+    });
+  });
+
+  describe('smart node master key index (path mismatch)', () => {
+    it(
+      'does not connect a new node whose key matches the master key ' +
+        'but whose path does not match the master path',
+      () => {
+        const scm = new Scm({ isTest: true });
+        const scope = Scope.example({ scm });
+        scope.mockContent({
+          sub: {
+            child: {
+              height: new NodeBluePrint<number>({
+                key: 'height',
+                initialProduct: 1,
+                smartMaster: ['master', 'height'],
+              }),
+            },
+          },
+        });
+        const smartNode = scope.findNode<number>('child/height')!;
+        scm.flush();
+        expect(smartNode.product).toBe(1);
+
+        // 'other/height' shares the master key 'height' but its path does
+        // not match ['master', 'height'] - the smart node stays
+        // unconnected.
+        scope.mockContent({ other: { height: 42 } });
+        scm.flush();
+        expect(smartNode.product).toBe(1);
+      },
+    );
+  });
+
+  // ...........................................................................
+  describe('disposed animated nodes', () => {
+    it(
+      'disposing a plain node with isAnimated=true removes it from the ' +
+        'animated set and does not stall its customers',
+      () => {
+        const scm = new Scm({ isTest: true });
+        const scope = Scope.example({ scm });
+        scope.mockContent({
+          animatedSrc: nbp({
+            from: [],
+            to: 'animatedSrc',
+            init: 0,
+            produce: (_c, p: number) => p + 1,
+          }),
+          other: 0,
+          consumer: nbp({
+            from: ['animatedSrc', 'other'],
+            to: 'consumer',
+            init: 0,
+            produce: (c) => (c[0] as number) + (c[c.length - 1] as number),
+          }),
+        });
+        const src = scope.findNode<number>('animatedSrc')!;
+        const other = scope.findNode<number>('other')!;
+        const consumer = scope.findNode<number>('consumer')!;
+        scm.flush();
+
+        src.isAnimated = true;
+        scm.flush();
+        expect(scm.animatedNodes).toContain(src);
+
+        // Dispose while a customer keeps the node alive.
+        src.dispose();
+        expect(scm.animatedNodes).not.toContain(src);
+
+        // Ticks must not re-nominate or re-stage the disposed node, and the
+        // customer must stay reachable through its other supplier.
+        for (let i = 0; i < 5; i++) {
+          scm.flush();
+        }
+        expect(scm.animatedNodes).not.toContain(src);
+        expect(src.isStaged).toBe(false);
+
+        other.product = 7;
+        scm.flush();
+        expect(consumer.product).toBeGreaterThanOrEqual(7);
+      },
+    );
   });
 });

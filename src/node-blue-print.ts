@@ -127,6 +127,27 @@ export class NodeBluePrint<T> {
    */
   readonly canBeSmart: boolean;
 
+  /**
+   * If true, this node only schedules its customers when a freshly produced
+   * product differs from the previous one.
+   *
+   * An unchanged product still finalizes the node cleanly, but does not start
+   * a downstream production wave. This lets a node act as a rate-limiting
+   * boundary (e.g. an AnimatedNode) so a jittery or high-frequency input
+   * does not cascade redundant recomputations through the graph.
+   *
+   * Defaults to false, preserving the "always propagate" behavior. The very
+   * first production always propagates, and gating is bypassed for insert
+   * nodes and nodes hosting inserts so insert chains always run.
+   */
+  readonly propagateOnChangeOnly: boolean;
+
+  /**
+   * Optional equality used by {@link propagateOnChangeOnly} to decide whether
+   * a product changed between two productions. When undefined, `===` is used.
+   */
+  readonly changeComparator?: (a: T, b: T) => boolean;
+
   /** An optional runtime type tag used by the json/string registries. */
   readonly type?: TypeTag<T>;
 
@@ -146,6 +167,8 @@ export class NodeBluePrint<T> {
     smartMaster?: readonly string[];
     canBeSmart?: boolean;
     productionTimeout?: Duration;
+    propagateOnChangeOnly?: boolean;
+    changeComparator?: (a: T, b: T) => boolean;
     type?: TypeTag<T>;
     fromJson?: FromJson<T>;
   }) {
@@ -158,6 +181,8 @@ export class NodeBluePrint<T> {
     this.innerSmartMaster = params.smartMaster ?? [];
     this.canBeSmart = params.canBeSmart ?? true;
     this.productionTimeout = params.productionTimeout;
+    this.propagateOnChangeOnly = params.propagateOnChangeOnly ?? false;
+    this.changeComparator = params.changeComparator;
     this.type = params.type;
     // `fromJson` is accepted for API compatibility but, as in Dart, not stored.
     void params.fromJson;
@@ -240,8 +265,7 @@ export class NodeBluePrint<T> {
       return existing as Node<T>;
     }
 
-    const result = createNode<T>({
-      bluePrint: this,
+    const result = this.createNode({
       scope: options.scope,
       owner: options.owner,
     });
@@ -251,6 +275,23 @@ export class NodeBluePrint<T> {
     }
 
     return result;
+  }
+
+  /**
+   * Creates the concrete node instance for this blue print.
+   *
+   * Subclasses override this to construct a specialized {@link Node} subtype
+   * (e.g. AnimatedNodeBluePrint returns an AnimatedNode). It is the single
+   * node construction point routed through by {@link instantiate} and
+   * Scope.findOrCreateNode, so subclasses are honored on every creation path.
+   * @param options - The target scope and optional owner.
+   */
+  createNode(options: { scope: Scope; owner?: Owner<Node<any>> }): Node<T> {
+    return createNode<T>({
+      bluePrint: this,
+      scope: options.scope,
+      owner: options.owner,
+    });
   }
 
   /**
@@ -282,6 +323,8 @@ export class NodeBluePrint<T> {
     canBeSmart?: boolean;
     smartMaster?: readonly string[];
     productionTimeout?: Duration;
+    propagateOnChangeOnly?: boolean;
+    changeComparator?: (a: T, b: T) => boolean;
   }): NodeBluePrint<T> {
     if (
       (changes.initialProduct === undefined ||
@@ -295,6 +338,10 @@ export class NodeBluePrint<T> {
       (changes.productionTimeout === undefined ||
         (this.productionTimeout !== undefined &&
           changes.productionTimeout.equals(this.productionTimeout))) &&
+      (changes.propagateOnChangeOnly === undefined ||
+        changes.propagateOnChangeOnly === this.propagateOnChangeOnly) &&
+      (changes.changeComparator === undefined ||
+        changes.changeComparator === this.changeComparator) &&
       (changes.smartMaster === undefined ||
         changes.smartMaster === this.smartMaster ||
         listEquals(changes.smartMaster, this.smartMaster) ||
@@ -312,6 +359,9 @@ export class NodeBluePrint<T> {
       canBeSmart: changes.canBeSmart ?? this.canBeSmart,
       smartMaster: changes.smartMaster ?? this.innerSmartMaster,
       productionTimeout: changes.productionTimeout ?? this.productionTimeout,
+      propagateOnChangeOnly:
+        changes.propagateOnChangeOnly ?? this.propagateOnChangeOnly,
+      changeComparator: changes.changeComparator ?? this.changeComparator,
       type: this.type,
     });
   }

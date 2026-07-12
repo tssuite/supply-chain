@@ -4,19 +4,19 @@ digraph unix {
   fontname="Arial"
   node [fontname="Arial"]
   edge [fontname="Arial"]
-  subgraph cluster_triangle_10 {
+  subgraph cluster_triangle_5 {
     label = "triangle"; // scope
     top_0 [
       label = "top"; // node
     ];
-    subgraph cluster_left_12 {
+    subgraph cluster_left_6 {
       label = "left"; // scope
       left_1 [
         label = "left"; // node
       ];
       
     }
-    subgraph cluster_right_14 {
+    subgraph cluster_right_7 {
       label = "right"; // scope
       right_2 [
         label = "right"; // node

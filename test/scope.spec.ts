@@ -4,6 +4,7 @@
 // Use of this source code is governed by terms that can be
 // found in the LICENSE file in the root of this package.
 
+import { writeGolden } from '@tssuite/golden';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
@@ -11,6 +12,7 @@ import {
   AssertionError,
   ExampleScopeRoot,
   Insert,
+  MarkdownFormat,
   Node,
   NodeBluePrint,
   Owner,
@@ -69,7 +71,7 @@ function init(options: { enableOnChange?: boolean } = {}): void {
   Node.onRecursiveChangeEnabled = enableOnChange;
 
   Node.testResetIdCounter();
-  Scope.testRestIdCounter();
+  Scope.testResetIdCounter();
   scm = new Scm({ isTest: true });
   scope = Scope.example({ scm });
 
@@ -94,6 +96,10 @@ describe('Scope', () => {
   describe('basic properties', () => {
     it('example', () => {
       expect(scope).toBeInstanceOf(Scope);
+    });
+
+    it('testRestIdCounter forwards to testResetIdCounter', () => {
+      expect(() => Scope.testRestIdCounter()).not.toThrow();
     });
 
     it('scm', () => {
@@ -1241,15 +1247,36 @@ describe('Scope', () => {
       });
     });
 
-    it('should print a simple graph correctly', () => {
+    // .........................................................................
+    // Writes mermaid markdown goldens. The file names must be unique per
+    // graph - otherwise the tests calling this helper overwrite each
+    // other's goldens and the committed content depends on test order.
+    const writeMermaidMarkdownGoldens = async (
+      chain: Scope,
+      base: string,
+    ): Promise<void> => {
+      // Create mermaid markdown github
+      const mdGitHub = chain.mermaid({
+        markdownFormat: MarkdownFormat.gitHub,
+      });
+      await writeGolden(`${base}_md_git_hub.mermaid.md`, mdGitHub);
+
+      // Create mermaid markdown azure
+      const mdAzure = chain.mermaid({ markdownFormat: MarkdownFormat.azure });
+      await writeGolden(`${base}_md_azure.mermaid.md`, mdAzure);
+    };
+
+    it('should print a simple graph correctly', async () => {
       const dot = scope.dot();
       expect(dot).not.toBeUndefined();
 
       const mm = scope.mermaid();
       expect(mm).not.toBeUndefined();
+
+      await writeMermaidMarkdownGoldens(scope, 'simple_graph');
     });
 
-    it('should print a more advanced graph correctly', () => {
+    it('should print a more advanced graph correctly', async () => {
       const scope = Scope.example({ createNode: false });
 
       // .................................
@@ -1300,15 +1327,19 @@ describe('Scope', () => {
 
       const mm = scope.mermaid();
       expect(mm).not.toBeUndefined();
+
+      await writeMermaidMarkdownGoldens(scope, 'advanced_graph');
     });
 
-    it('should print scopes correctly', () => {
+    it('should print scopes correctly', async () => {
       const root = new ExampleScopeRoot({ scm: Scm.testInstance });
       const dot = root.dot();
       expect(dot).not.toBeUndefined();
 
       const mm = root.mermaid();
       expect(mm).not.toBeUndefined();
+
+      await writeMermaidMarkdownGoldens(root, 'graphs_with_scopes');
     });
   });
 

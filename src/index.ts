@@ -21,6 +21,8 @@ export * from './schedule-task.ts';
 export * from './node-blue-print.ts';
 export * from './node.ts';
 export * from './scope.ts';
+export * from './animated-node.ts';
+export * from './animated-node-blue-print.ts';
 export * from './scm.ts';
 export * from './disposed.ts';
 export * from './insert.ts';

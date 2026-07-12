@@ -321,8 +321,17 @@ export class Scope {
   readonly id: number;
 
   /** Reset id counter for test purposes. */
-  static testRestIdCounter(): void {
+  static testResetIdCounter(): void {
     Scope._idCounter = 0;
+  }
+
+  /**
+   * Old, misspelled name of {@link testResetIdCounter}. Kept as a forwarding
+   * alias because the rename shipped in a non-major release.
+   * @deprecated Use testResetIdCounter instead
+   */
+  static testRestIdCounter(): void {
+    Scope.testResetIdCounter();
   }
 
   // ...........................................................................
@@ -537,8 +546,14 @@ export class Scope {
   /**
    * Returns meta scopes. These scopes manage suppliers providing information
    * about the scope.
+   *
+   * Note: The 'on' meta scope is created lazily. It must not be created on
+   * disposed scopes - creating a meta scope would undispose its parent.
    */
   get metaScopes(): readonly Scope[] {
+    if (!this.isMetaScope && !this._isDisposed) {
+      this._ensureOnMetaScope();
+    }
     return [...this._metaScopes.values()];
   }
 
@@ -547,6 +562,9 @@ export class Scope {
    * @param key - The key of the meta scope.
    */
   metaScope(key: string): Scope | undefined {
+    if (key === 'on' && !this.isMetaScope && !this._isDisposed) {
+      return this._ensureOnMetaScope();
+    }
     return this._metaScopes.get(key);
   }
 
@@ -622,8 +640,13 @@ export class Scope {
       return existingNode as unknown as Node<T>;
     }
 
-    // Create a new node
-    const node = new Node<T>({ bluePrint, scope: this });
+    // Validate before creating: a misconfigured blue print should fail
+    // here with a clear error, not later during production.
+    bluePrint.check();
+
+    // Create a new node. createNode honors NodeBluePrint subtypes such as
+    // AnimatedNodeBluePrint; for a plain blue print it builds a plain Node.
+    const node = bluePrint.createNode({ scope: this });
 
     return node;
   }
@@ -644,7 +667,7 @@ export class Scope {
     for (const bluePrint of bluePrints) {
       const newNode = bluePrint.instantiate({
         scope: this,
-        applyScBuilders: true,
+        applyScBuilders: options.applyScBuilders,
         owner: options.owner,
       });
       result.push(newNode);
@@ -1121,6 +1144,7 @@ export class Scope {
       parentScopeDepth?: number;
       highlightedNodes?: Node<any>[];
       highlightedScopes?: Scope[];
+      markdownFormat?: MarkdownFormat;
     } = {},
   ): string {
     const g = this.graph({
@@ -1130,8 +1154,10 @@ export class Scope {
       highlightedScopes: options.highlightedScopes,
     });
 
-    const mm = new GraphToMermaid({ graph: g }).mermaid;
-    return mm;
+    const mm = new GraphToMermaid({ graph: g });
+    return options.markdownFormat == null
+      ? mm.mermaid
+      : mm.markdown({ markdownFormat: options.markdownFormat });
   }
 
   // ...........................................................................
@@ -1423,15 +1449,28 @@ export class Scope {
       return;
     }
 
-    this._initOnMetaScope();
+    // The 'on' meta scope is created lazily (_ensureOnMetaScope) - unless
+    // change nodes are enabled, which live inside it.
+    if (Node.onChangeEnabled || Node.onRecursiveChangeEnabled) {
+      this._ensureOnMetaScope();
+    }
+
     this._initOnChangeNode();
     this._initOnChangeRecursiveNode();
   }
 
   // ...........................................................................
-  private _initOnMetaScope(): void {
-    // Adds a 'on' meta scope providing event suppliers like on.change, etc.
-    Scope.metaScope({ key: 'on', parent: this });
+  /**
+   * Creates the 'on' meta scope providing event suppliers like on.change.
+   *
+   * The scope is created lazily on first access: constructing it eagerly
+   * would double the cost of every scope instantiation.
+   */
+  private _ensureOnMetaScope(): Scope {
+    return (
+      this._metaScopes.get('on') ??
+      Scope.metaScope({ key: 'on', parent: this })
+    );
   }
 
   // ...........................................................................
@@ -1623,6 +1662,16 @@ export class Scope {
       ? keyParts.slice(0, keyParts.length - 1)
       : keyParts;
 
+    // Fail fast: when no node with the searched key exists at all, the
+    // search through the scope tree can be skipped entirely. Failed
+    // lookups would otherwise scan large parts of the scope tree.
+    if (findNodes && !this.scm.hasNodesWithKey(nodeKey)) {
+      if (throwIfNotFound) {
+        throw new ArgumentError(`Node with path "${key}" not found.`);
+      }
+      return undefined;
+    }
+
     let result: unknown;
 
     result = searchRoot._findItemInOwnScope<T>(
@@ -1703,8 +1752,7 @@ export class Scope {
     // If path matches own scope and path segment is the last one
     // Return this scope.
     if (findScopes && scopePath.length === 1) {
-      const result =
-        this.child(scopePath[0]) ?? this._metaScopes.get(scopePath[0]);
+      const result = this.child(scopePath[0]) ?? this.metaScope(scopePath[0]);
 
       if (
         excludedScopes.length !== 0 &&
@@ -1724,7 +1772,7 @@ export class Scope {
     // If the scope path is not empty, find the child scope
     if (scopePath.length !== 0 && !pathMatchesOwnScope) {
       const childScope =
-        this.child(scopePath[0]) ?? this._metaScopes.get(scopePath[0]);
+        this.child(scopePath[0]) ?? this.metaScope(scopePath[0]);
       if (childScope == null) {
         return undefined;
       } else {
@@ -1976,9 +2024,9 @@ export class Scope {
       if (this.matchesKey(path[0])) {
         return this;
       }
-      const metaScope = this._metaScopes.get(path[0]);
-      if (metaScope != null) {
-        return metaScope;
+      const metaScopeForKey = this.metaScope(path[0]);
+      if (metaScopeForKey != null) {
+        return metaScopeForKey;
       }
     }
 

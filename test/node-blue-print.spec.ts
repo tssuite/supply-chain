@@ -730,6 +730,25 @@ describe('NodeBluePrint', () => {
         });
         expect(newBluePrint).toBe(bluePrint);
       });
+
+      it('when propagateOnChangeOnly does not change', () => {
+        const bluePrint = NodeBluePrint.example().copyWith({
+          propagateOnChangeOnly: true,
+        });
+        const newBluePrint = bluePrint.copyWith({
+          propagateOnChangeOnly: true,
+        });
+        expect(newBluePrint).toBe(bluePrint);
+      });
+
+      it('when change comparator does not change', () => {
+        const cmp = (a: number, b: number): boolean => a === b;
+        const bluePrint = NodeBluePrint.example().copyWith({
+          changeComparator: cmp,
+        });
+        const newBluePrint = bluePrint.copyWith({ changeComparator: cmp });
+        expect(newBluePrint).toBe(bluePrint);
+      });
     });
 
     describe('returns a modified instance', () => {

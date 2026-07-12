@@ -14,7 +14,7 @@ import { writeFileSync } from 'node:fs';
 // NOTE(port): `Scm` is imported from its source file first (before the barrel
 // `../src/index.ts`). See the note in test/scm.spec.ts.
 import { Scm } from '../src/scm.ts';
-import { Node, NodeBluePrint, Scope } from '../src/index.ts';
+import { Node, NodeBluePrint, Scope, ScopeBluePrint } from '../src/index.ts';
 
 /** Result of one benchmark scenario */
 class BenchResult {
@@ -284,6 +284,89 @@ function bulkUpdate(
 
 // .............................................................................
 /**
+ * Instantiates a chain of nested ScopeBluePrints - measures scope and
+ * builder machinery during blueprint driven construction.
+ */
+function nestedScopes(depth: number, nodesPerScope: number): BenchResult {
+  const start = performance.now();
+  const scm = new Scm({ isTest: true });
+  const root = Scope.root({ key: 'bench', scm });
+
+  const makeNodes = (): NodeBluePrint<number>[] => {
+    const nodes: NodeBluePrint<number>[] = [];
+    for (let i = 0; i < nodesPerScope; i++) {
+      nodes.push(new NodeBluePrint<number>({ key: `n${i}`, initialProduct: 0 }));
+    }
+    return nodes;
+  };
+
+  let bp = new ScopeBluePrint({ key: 'level0', nodes: makeNodes() });
+  for (let d = 1; d < depth; d++) {
+    bp = new ScopeBluePrint({
+      key: `level${d}`,
+      nodes: makeNodes(),
+      children: [bp],
+    });
+  }
+
+  const scope = bp.instantiate({ scope: root });
+  scm.flush();
+  const setupMs = performance.now() - start;
+
+  const verified = scope.findNode<number>('level0/n0') !== undefined;
+
+  return new BenchResult(
+    `nestedScopes(d=${depth},n=${nodesPerScope})`,
+    depth * nodesPerScope,
+    setupMs,
+    1,
+    0,
+    verified,
+  );
+}
+
+// .............................................................................
+/**
+ * Linear chain like chain(), but with drainMode enabled: all waves of an
+ * update are processed within a single production cycle.
+ */
+function drainChain(n: number, updates: number): BenchResult {
+  let start = performance.now();
+  const scm = new Scm({ isTest: true });
+  scm.drainMode = true;
+  const scope = Scope.root({ key: 'bench', scm });
+
+  new Node<number>({ bluePrint: source('n0'), scope });
+  for (let i = 1; i < n; i++) {
+    new Node<number>({ bluePrint: worker(`n${i}`, [`n${i - 1}`]), scope });
+  }
+  scm.flush();
+  const setupMs = performance.now() - start;
+
+  const first = scope.findNode<number>('n0')!;
+  const last = scope.findNode<number>(`n${n - 1}`)!;
+
+  start = performance.now();
+  for (let u = 1; u <= updates; u++) {
+    first.product = u;
+    scm.flush();
+  }
+  const updateTotalMs = performance.now() - start;
+
+  const verified = last.product === updates + n - 1;
+
+  return new BenchResult(
+    `drainChain(n=${n})`,
+    n,
+    setupMs,
+    updates,
+    updateTotalMs,
+    verified,
+  );
+}
+
+// .............................................................................
+/**
  * Linear chain driven in non-test mode (microtasks + real timers) - the
  * production configuration of the scm.
  */
@@ -362,6 +445,8 @@ async function main(args: string[]): Promise<void> {
     layered(10, 10, 100),
     layered(32, Math.trunc(16 / (quick ? 2 : 1)), 50),
     bulkUpdate(64, 8, 50),
+    nestedScopes(Math.trunc(150 / f), 10),
+    drainChain(Math.trunc(1000 / f), 100),
     await chainProductionMode(Math.trunc(500 / f), 20),
   ];
 

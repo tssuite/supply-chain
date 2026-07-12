@@ -459,8 +459,13 @@ export class ScopeBluePrint {
       builder.instantiate({ scope: innerScope });
     }
 
-    // Apply parent builders
-    this.applyParentScBuilders(innerScope);
+    // Apply parent builders - but only once for the outermost scope of this
+    // instantiation. The applyToScope pass covers the whole subtree; child
+    // scopes (initScBuilders == false) must not repeat it for their
+    // subtrees.
+    if (options.initScBuilders ?? true) {
+      this.applyParentScBuilders(innerScope);
+    }
 
     // Call onInstantiate
     this.onInstantiate(innerScope);

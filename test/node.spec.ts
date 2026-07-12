@@ -1877,4 +1877,258 @@ describe('Node coverage completion', () => {
       expect(producer.product).toBeGreaterThan(0);
     });
   });
+
+  // #########################################################################
+  describe('matchesPath', () => {
+    it('returns false when the key does not match', () => {
+      expect(node.matchesPath('otherKey')).toBe(false);
+    });
+  });
+
+  // #########################################################################
+  describe('deepSuppliers, deepCustomers with unlimited depth', () => {
+    it('visits nodes reachable via multiple paths exactly once', () => {
+      const scope = Scope.example();
+      const localScm = scope.scm;
+
+      // A diamond: a -> b, a -> c, b -> d, c -> d
+      scope.mockContent({
+        a: 0,
+        b: nbp({ from: ['a'], to: 'b', init: 0 }),
+        c: nbp({ from: ['a'], to: 'c', init: 0 }),
+        d: nbp({
+          from: ['b', 'c'],
+          to: 'd',
+          init: 0,
+          produce: (c) => (c[0] as number) + (c[c.length - 1] as number),
+        }),
+      });
+      localScm.flush();
+
+      const a = scope.findNode<number>('a')!;
+      const d = scope.findNode<number>('d')!;
+
+      // 'a' is reachable from 'd' via both 'b' and 'c' but is returned
+      // exactly once.
+      const suppliers = d.deepSuppliers({ depth: -1 });
+      expect(suppliers.filter((n) => n === a)).toHaveLength(1);
+      expect(suppliers).toHaveLength(3);
+
+      // Same for the customer direction: 'd' is visited once from 'a'.
+      const customers = a.deepCustomers({ depth: -1 });
+      expect(customers.filter((n) => n === d)).toHaveLength(1);
+      expect(customers).toHaveLength(3);
+    });
+  });
+
+  // #########################################################################
+  describe('couldBeMasterOf', () => {
+    it('returns false when the master candidate is a meta node', () => {
+      const scope = Scope.example();
+      const onScope = scope.metaScopeFindOrCreate('meta');
+      const metaNode = new NodeBluePrint<number>({
+        key: 'height',
+        initialProduct: 0,
+      }).instantiate({ scope: onScope });
+
+      const smartNode = new NodeBluePrint<number>({
+        key: 'smartHeight',
+        initialProduct: 0,
+        smartMaster: ['height'],
+      }).instantiate({ scope });
+
+      expect(metaNode.couldBeMasterOf(smartNode)).toBe(false);
+    });
+  });
+
+  // #########################################################################
+  describe('propagateOnChangeOnly', () => {
+    it('does not schedule customers for an unchanged product', () => {
+      const localScm = new Scm({ isTest: true });
+      const scope = Scope.example({ scm: localScm });
+      scope.mockContent({
+        a: 5,
+        gated: new NodeBluePrint<number>({
+          key: 'gated',
+          initialProduct: 0,
+          suppliers: ['a'],
+          produce: (c) => Math.min(Math.max(c[0] as number, 0), 10),
+          propagateOnChangeOnly: true,
+        }),
+        counter: nbp({
+          from: ['gated'],
+          to: 'counter',
+          init: 0,
+          produce: (_c, p: number) => p + 1,
+        }),
+      });
+      const a = scope.findNode<number>('a')!;
+      const counter = scope.findNode<number>('counter')!;
+      localScm.flush();
+      const produced = counter.product;
+
+      // 'gated' clamps 5 -> 5 (unchanged): customer must not be scheduled.
+      a.product = 5;
+      localScm.flush();
+      expect(counter.product).toBe(produced);
+
+      // 'gated' clamps 20 -> 10 (changed): customer is scheduled.
+      a.product = 20;
+      localScm.flush();
+      expect(counter.product).toBe(produced + 1);
+    });
+
+    it('uses the changeComparator when provided', () => {
+      const localScm = new Scm({ isTest: true });
+      const scope = Scope.example({ scm: localScm });
+      scope.mockContent({
+        a: 0.0,
+        gated: new NodeBluePrint<number>({
+          key: 'gated',
+          initialProduct: 0.0,
+          suppliers: ['a'],
+          produce: (c) => c[0] as number,
+          propagateOnChangeOnly: true,
+          changeComparator: (x, y) => Math.abs(x - y) < 1.0,
+        }),
+        counter: nbp({
+          from: ['gated'],
+          to: 'counter',
+          init: 0,
+          produce: (_c, p: number) => p + 1,
+        }),
+      });
+      const a = scope.findNode<number>('a')!;
+      const counter = scope.findNode<number>('counter')!;
+      localScm.flush();
+      const produced = counter.product;
+
+      // Within tolerance -> treated as unchanged.
+      a.product = 0.5;
+      localScm.flush();
+      expect(counter.product).toBe(produced);
+
+      // Beyond tolerance -> changed.
+      a.product = 5.0;
+      localScm.flush();
+      expect(counter.product).toBe(produced + 1);
+    });
+
+    it(
+      'compares against the last propagated product, so cumulative ' +
+        'drift propagates',
+      () => {
+        const localScm = new Scm({ isTest: true });
+        const scope = Scope.example({ scm: localScm });
+        scope.mockContent({
+          a: 0.0,
+          gated: new NodeBluePrint<number>({
+            key: 'gated',
+            initialProduct: 0.0,
+            suppliers: ['a'],
+            produce: (c) => c[0] as number,
+            propagateOnChangeOnly: true,
+            changeComparator: (x, y) => Math.abs(x - y) < 1.0,
+          }),
+          sink: nbp({
+            from: ['gated'],
+            to: 'sink',
+            init: -1.0,
+            produce: (c) => c[0] as number,
+          }),
+        });
+        const a = scope.findNode<number>('a')!;
+        const sink = scope.findNode<number>('sink')!;
+        localScm.flush();
+
+        // Each step stays within tolerance of the PREVIOUS step, but the
+        // cumulative drift exceeds it. The gate must compare against the
+        // last PROPAGATED product - not re-base on every gated production -
+        // so the drift propagates once it exceeds the tolerance.
+        for (let i = 1; i <= 20; i++) {
+          a.product = i * 0.9;
+          localScm.flush();
+        }
+        expect(Math.abs(sink.product - 18.0)).toBeLessThanOrEqual(1.0);
+      },
+    );
+
+    it('propagates external product writes on a writable gated node', () => {
+      const localScm = new Scm({ isTest: true });
+      const scope = Scope.example({ scm: localScm });
+      scope.mockContent({
+        src: new NodeBluePrint<number>({
+          key: 'src',
+          initialProduct: 0,
+          suppliers: [],
+          propagateOnChangeOnly: true,
+        }),
+        echo: nbp({
+          from: ['src'],
+          to: 'echo',
+          init: -1,
+          produce: (c) => c[0] as number,
+        }),
+      });
+      const src = scope.findNode<number>('src')!;
+      const echo = scope.findNode<number>('echo')!;
+      localScm.flush();
+
+      // The gate must not compare the freshly written product against
+      // itself - external writes have already overwritten the original
+      // product when the production runs.
+      src.product = 42;
+      localScm.flush();
+      expect(echo.product).toBe(42);
+
+      src.product = 43;
+      localScm.flush();
+      expect(echo.product).toBe(43);
+
+      // An unchanged write is still gated.
+      const echoProductions = echo.product;
+      src.product = 43;
+      localScm.flush();
+      expect(echo.product).toBe(echoProductions);
+    });
+
+    it(
+      'propagates un-mocking even when the recomputed product equals ' +
+        'the pre-mock original',
+      () => {
+        const localScm = new Scm({ isTest: true });
+        const scope = Scope.example({ scm: localScm });
+        scope.mockContent({
+          a: 5,
+          gated: new NodeBluePrint<number>({
+            key: 'gated',
+            initialProduct: 0,
+            suppliers: ['a'],
+            produce: (c) => c[0] as number,
+            propagateOnChangeOnly: true,
+          }),
+          sink: nbp({
+            from: ['gated'],
+            to: 'sink',
+            init: -1,
+            produce: (c) => c[0] as number,
+          }),
+        });
+        const gated = scope.findNode<number>('gated')!;
+        const sink = scope.findNode<number>('sink')!;
+        localScm.flush();
+        expect(sink.product).toBe(5);
+
+        gated.mockedProduct = 99;
+        localScm.flush();
+        expect(sink.product).toBe(99);
+
+        // Un-mock: the recomputed 5 equals the pre-mock original, but the
+        // customers last saw 99 - the change must propagate.
+        gated.mockedProduct = undefined;
+        localScm.flush();
+        expect(sink.product).toBe(5);
+      },
+    );
+  });
 });

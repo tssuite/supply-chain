@@ -66,6 +66,7 @@ export class Node<T> {
     this.scm = p.scope.scm;
     this._owner = p.owner;
     this._originalProduct = p.bluePrint.initialProduct;
+    this._lastPropagatedProduct = p.bluePrint.initialProduct;
     assert(isCamelCase(p.bluePrint.key));
     this._bluePrints.push(p.bluePrint);
     this._init();
@@ -89,6 +90,12 @@ export class Node<T> {
   dispose(): void {
     this._owner?.willDispose?.(this);
     this._isDisposed = true;
+
+    // Stop animating. A disposed node kept alive by remaining customers
+    // would otherwise stay in the SCM's animated set, be re-nominated on
+    // every tick and - since disposed nodes never produce - stay staged
+    // forever, stalling its customers.
+    this.isAnimated = false;
 
     // Remove the node from the scm's prepared sets. Disposed nodes must not
     // keep the production pipeline open.
@@ -403,6 +410,24 @@ export class Node<T> {
   private _originalProduct: T;
 
   /**
+   * Whether this node has finished at least one production. Used by the
+   * change-gating in [_applyProduct]: the first production always propagates.
+   */
+  private _producedAtLeastOnce = false;
+
+  /**
+   * The product the customers last received.
+   *
+   * This is the baseline the change-gating in [_applyProduct] compares a
+   * freshly produced product against. It must NOT be the previous
+   * [_originalProduct]: external writes (the [product] setter) overwrite
+   * [_originalProduct] before the production runs, and gated productions
+   * would re-base the comparison so unbounded drift never propagates.
+   * Mocked announces update it too - customers observed the mocked value.
+   */
+  private _lastPropagatedProduct: T;
+
+  /**
    * Monotonic production generation.
    *
    * Incremented on every {@link produce} call. An asynchronous production
@@ -446,6 +471,11 @@ export class Node<T> {
       this.scm.unregisterAsyncProduction(this);
       if (announce) {
         this.scm.hasNewProduct(this);
+
+        // Customers observed the mocked product. Track it as the gating
+        // baseline so that un-mocking propagates even when the recomputed
+        // product equals the pre-mock original.
+        this._lastPropagatedProduct = this.product;
       }
       return;
     }
@@ -493,6 +523,21 @@ export class Node<T> {
 
     this._originalProduct = newProduct;
 
+    // Change-gating: a node configured with propagateOnChangeOnly does not
+    // schedule its customers when the freshly produced product equals the
+    // product the customers last received ([_lastPropagatedProduct]). The
+    // first production and insert chains always propagate.
+    const gate =
+      this.bluePrint.propagateOnChangeOnly &&
+      this._producedAtLeastOnce &&
+      !this.isInsert &&
+      this._inserts.length === 0 &&
+      this._productIsUnchanged(this._lastPropagatedProduct, newProduct);
+    this._producedAtLeastOnce = true;
+    if (!gate) {
+      this._lastPropagatedProduct = newProduct;
+    }
+
     // If this node is the last insert in the chain,
     // write the product into the host's insertResult
     if (this.isInsert) {
@@ -504,12 +549,23 @@ export class Node<T> {
 
     // Announce
     if (announce) {
-      this.scm.hasNewProduct(this);
+      this.scm.hasNewProduct(this, { propagate: !gate });
     }
 
-    if (triggerOnChange) {
+    if (triggerOnChange && !gate) {
       this._triggerOnChange();
     }
+  }
+
+  // ...........................................................................
+  /**
+   * Returns true if `next` equals `previous` according to the blue print's
+   * {@link NodeBluePrint.changeComparator} (or `===` when none is configured).
+   * @param previous - The previously propagated product.
+   * @param next - The freshly produced product.
+   */
+  private _productIsUnchanged(previous: T, next: T): boolean {
+    return this.bluePrint.changeComparator?.(previous, next) ?? previous === next;
   }
 
   // ...........................................................................
@@ -606,11 +662,20 @@ export class Node<T> {
 
   /**
    * Get suppliers of the node of a given depth.
+   *
+   * With a negative depth ALL transitive suppliers are returned, each
+   * exactly once. With a bounded depth, nodes reachable via multiple paths
+   * are contained once per path.
    * @param p - Options.
    */
   deepSuppliers(p: { depth?: number } = {}): Node<any>[] {
-    let depth = p.depth ?? 1;
-    if (depth < 0) depth = 100000;
+    const depth = p.depth ?? 1;
+
+    // Unlimited depth: traverse each node once. Without the visited set the
+    // enumeration would be exponential on diamond shaped graphs.
+    if (depth < 0) {
+      return Node._collectDeep(this, (n) => n._suppliers);
+    }
 
     if (depth === 0) {
       return [];
@@ -621,6 +686,47 @@ export class Node<T> {
     for (const supplier of this.suppliers) {
       result.push(...supplier.deepSuppliers({ depth: depth - 1 }));
     }
+    return result;
+  }
+
+  // ...........................................................................
+  /**
+   * Collects all nodes transitively reachable from `root` via `edges`,
+   * each exactly once, in depth first pre-order (direct neighbors first,
+   * then the neighbors of the first neighbor, etc.).
+   *
+   * Iterative: the recursion depth would equal the graph depth and
+   * overflow the stack on deep chains.
+   * @param root - The node to start from.
+   * @param edges - Returns the neighbors of a node.
+   */
+  private static _collectDeep(
+    root: Node<any>,
+    edges: (node: Node<any>) => Iterable<Node<any>>,
+  ): Node<any>[] {
+    const result: Node<any>[] = [];
+    const visited = new Set<Node<any>>([root]);
+    const stack: Node<any>[] = [root];
+
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+
+      // Emit all yet unvisited neighbors first
+      const next: Node<any>[] = [];
+      for (const neighbor of edges(node)) {
+        if (!visited.has(neighbor)) {
+          visited.add(neighbor);
+          result.push(neighbor);
+          next.push(neighbor);
+        }
+      }
+
+      // Then descend into them, starting with the first one
+      for (let i = next.length - 1; i >= 0; i--) {
+        stack.push(next[i]);
+      }
+    }
+
     return result;
   }
 
@@ -669,10 +775,21 @@ export class Node<T> {
 
   /**
    * Get customers of the node of a given depth.
+   *
+   * With a negative depth ALL transitive customers are returned, each
+   * exactly once. With a bounded depth, nodes reachable via multiple paths
+   * are contained once per path.
    * @param p - Options.
    */
   deepCustomers(p: { depth?: number } = {}): Node<any>[] {
     const depth = p.depth ?? 1;
+
+    // Unlimited depth: traverse each node once. Without the visited set the
+    // enumeration would be exponential on diamond shaped graphs.
+    if (depth < 0) {
+      return Node._collectDeep(this, (n) => n._customers);
+    }
+
     if (depth === 0) {
       return [];
     }
