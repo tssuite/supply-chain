@@ -1,0 +1,6 @@
+{
+  "publishConfig": {
+    "mergeMessage": "Setup branch rules for tssuite repos",
+    "versionIncrement": "patch"
+  }
+}
