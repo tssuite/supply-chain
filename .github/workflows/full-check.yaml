@@ -1,0 +1,83 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  # pull_request:
+  #   branches: [main]
+
+jobs:
+  test:
+    # Windows is where the host abstraction is most likely to be wrong:
+    # `package:path` switches to the windows style there (dart2wasm derives
+    # that from `process.platform`), and the Node host has to agree with it.
+    # Nothing else in the suite exercises that combination.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Dart pub
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            pubspec.lock
+          key: ${{ runner.os }}-dart-${{ hashFiles('pubspec.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-dart-
+
+      - name: Set up Dart SDK
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Install Dart dependencies
+        run: dart pub get
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Approve native build scripts (esbuild, msw)
+        run: pnpm approve-builds --all
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Dart tests
+        run: dart test
+
+      - name: Build (Dart → JS+Wasm, then TS)
+        run: pnpm run build
+
+      - name: Vitest (unit, e2e, browser) with coverage
+        run: pnpm run test:vitest
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Prettier (format check)
+        run: pnpm run format:check
