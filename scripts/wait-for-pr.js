@@ -1,6 +1,6 @@
-/**
+/*
  * @license
- * Copyright (c) ggsuite
+ * Copyright (c) 2025 tssuite
  *
  * Use of this source code is governed by terms that can be
  * found in the LICENSE file in the root of this package.
@@ -41,7 +41,7 @@ function getPRStatus() {
 async function checkIfPipelineHasFailed() {
   try {
     const json = runCommand(
-      'gh run list --repo rljson/template-project --limit 1 --json status,conclusion',
+      'gh run list --repo tssuite/template-project --limit 1 --json status,conclusion',
       true,
       false,
     ).trim();
