@@ -15,7 +15,8 @@ export default defineConfig(({ mode }) => {
       globals: true,
       environment: 'node',
       setupFiles: ['./test/setup/test-setup.ts'],
-      include: ['**/test/**/*.spec.ts'],
+      // *.test.ts picks up the version test gg_version generates on release.
+      include: ['**/test/**/*.spec.ts', '**/test/**/*.test.ts'],
 
       reporters: ['default'],
       coverage: {
