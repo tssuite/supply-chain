@@ -4,10 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  '@tssuite/golden': link:../golden
-  '@tssuite/project-root': link:../project-root
-
 importers:
 
   .:
@@ -19,14 +15,14 @@ importers:
         specifier: ^0.1.1
         version: 0.1.1
       '@tssuite/golden':
-        specifier: link:../golden
-        version: link:../golden
+        specifier: ^1.0.1
+        version: 1.0.1(@rljson/json@0.0.23)(@tssuite/project-root@0.0.18)
       '@tssuite/helix-js':
         specifier: ^0.1.0
         version: 0.1.0
       '@tssuite/project-root':
-        specifier: link:../project-root
-        version: link:../project-root
+        specifier: ^0.0.18
+        version: 0.0.18
       '@types/node':
         specifier: ^26.4.0
         version: 26.4.0
@@ -52,8 +48,8 @@ importers:
         specifier: ^0.5.2
         version: 0.5.2(eslint@10.9.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@6.0.3)
       globals:
-        specifier: ^17.11.0
-        version: 17.11.0
+        specifier: ^17.12.0
+        version: 17.12.0
       jsdoc:
         specifier: ^4.0.5
         version: 4.0.5
@@ -365,9 +361,20 @@ packages:
     resolution: {integrity: sha512-T2wQ5G6Wt4JfpA8wXqFQzQgryZQAUmTD09nclu0wLKgWDtulh6L7/pc0UG3klCZwRaFd2LQOnaIV5+uDzTuV0g==}
     engines: {node: '>=22'}
 
+  '@tssuite/golden@1.0.1':
+    resolution: {integrity: sha512-tka90Ai5fIcwB4Hmoi5DYqX9SKH05G7IBiU0t9J8M8eTS9Keb4anZkjVxxQOmVNOPr0Bt5Gy7QYFZtIj2PO8AQ==}
+    engines: {node: '>=22.14.0'}
+    peerDependencies:
+      '@rljson/json': ^0.0.21
+      '@tssuite/project-root': 0.0.17
+
   '@tssuite/helix-js@0.1.0':
     resolution: {integrity: sha512-0mxCYBZL/EWWBDgoJHGfk9jSWh82spU1fPdoDHzkxKh2BAA6A6MLZDlDSSFc0bqsiggP5Z9gww3z2TqSYFFkpA==}
     engines: {node: '>=22'}
+
+  '@tssuite/project-root@0.0.18':
+    resolution: {integrity: sha512-YMLUr3tVj0GbF2rsC/lL8NuzqY0ydPZbrIcLjmvX/rZQOxnPYdkcB3kaZWivlVD+qm9ce7WShngpCnkNVgbF3Q==}
+    engines: {node: '>=22.14.0'}
 
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
@@ -793,8 +800,8 @@ packages:
   glob-to-regexp@0.4.1:
     resolution: {integrity: sha512-lkX1HJXwyMcprw/5YUZc2s7DrpAiHB21/V+E1rHUrVNokkvB6bqMzT0VfV6/86ZNabt1k14YOIaT7nDvOX3Iiw==}
 
-  globals@17.11.0:
-    resolution: {integrity: sha512-Z2I8hM+PbJDXQDq3Icgpzv+mPdwr68iZUU9d5WW4FuXfDUQfkZaZuvjMv42/5crNyw154+9+VWXbYrUgDXbxNw==}
+  globals@17.12.0:
+    resolution: {integrity: sha512-cezEd/DTyyht9cvSSURyygXPfy04GtWO/5e6ZPvH7fCtjKz9PYOmuawphw1Ctd1f6C+5JypXfGD7ahNMXvevBA==}
     engines: {node: '>=18'}
 
   globrex@0.1.2:
@@ -1698,7 +1705,14 @@ snapshots:
       '@ggdna/dna-translate': 0.1.0
       '@ggdna/dna-vscode': 0.1.0
 
+  '@tssuite/golden@1.0.1(@rljson/json@0.0.23)(@tssuite/project-root@0.0.18)':
+    dependencies:
+      '@rljson/json': 0.0.23
+      '@tssuite/project-root': 0.0.18
+
   '@tssuite/helix-js@0.1.0': {}
+
+  '@tssuite/project-root@0.0.18': {}
 
   '@types/chai@5.2.3':
     dependencies:
@@ -2183,7 +2197,7 @@ snapshots:
 
   glob-to-regexp@0.4.1: {}
 
-  globals@17.11.0: {}
+  globals@17.12.0: {}
 
   globrex@0.1.2: {}
 
