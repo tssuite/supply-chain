@@ -1,6 +1,6 @@
 {
   "name": "@tssuite/supply-chain",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A data-flow and state-management framework — TypeScript port of the Dart supply_chain library",
   "homepage": "https://github.com/tssuite/supply-chain",
   "bugs": "https://github.com/tssuite/supply-chain/issues",
