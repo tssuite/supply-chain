@@ -31,7 +31,9 @@
   },
   "devDependencies": {
     "@rljson/json": "^0.0.23",
+    "@tssuite/dna-tssuite": "^0.1.1",
     "@tssuite/golden": "^1.0.0",
+    "@tssuite/helix-js": "^0.1.0",
     "@tssuite/project-root": "^0.0.17",
     "@types/node": "^26.2.0",
     "@typescript-eslint/eslint-plugin": "^8.67.0",
