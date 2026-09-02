@@ -5,6 +5,7 @@ import path from 'path';
 import { blue, gray, green, red, yellow } from './functions/colors.js';
 
 // .............................................................................
+const fileNameRexp = /(\.ts|\.md|\.log|\.js|\.json)$/;
 const excludedFiles = ['create-new-repo.md', 'rename-class.js'];
 
 // .............................................................................
@@ -13,19 +14,8 @@ const isExcluded = (fileName) => {
   return excludedFiles.includes(fileName);
 };
 
-const shouldProcessFile = (file) => !isExcluded(file);
-
-// Binary files must not be rewritten as UTF-8, that would corrupt them.
-const readTextFile = (fullPath) => {
-  const buffer = fs.readFileSync(fullPath);
-  if (buffer.includes(0)) return null;
-  return buffer.toString('utf8');
-};
-
-const writeTextFile = (fullPath, oldContent, newContent) => {
-  if (newContent === oldContent) return;
-  fs.writeFileSync(fullPath, newContent, 'utf8');
-};
+const shouldProcessFile = (file) =>
+  fileNameRexp.test(file) && !isExcluded(file);
 
 if (process.argv.length < 4) {
   const usage = red('Usage:');
@@ -57,8 +47,6 @@ const classAUpper = toUpperCamelCase(classA);
 const classBUpper = toUpperCamelCase(classB);
 const classASnake = toSnakeCase(classA);
 const classBSnake = toSnakeCase(classB);
-const classASnakeUnderscore = classASnake.replace(/-/g, '_');
-const classBSnakeUnderscore = classBSnake.replace(/-/g, '_');
 
 const replaceIncludesFirst = (directory) => {
   const files = fs.readdirSync(directory, { withFileTypes: true });
@@ -70,21 +58,12 @@ const replaceIncludesFirst = (directory) => {
       if (file.name.startsWith('.') || file.name === 'node_modules') continue;
       replaceIncludesFirst(fullPath);
     } else if (shouldProcessFile(file.name)) {
-      const original = readTextFile(fullPath);
-      if (original === null) continue;
-      const content = original
-        .replace(
-          new RegExp(`(\\/)${classASnake}(\\.ts)?([\\.\\/\\'\\\"\\\\])`, 'g'),
-          `$1${classBSnake}$2$3`,
-        )
-        .replace(
-          new RegExp(
-            `(\\/)${classASnakeUnderscore}(\\.ts)?([\\.\\/\\'\\\"\\\\])`,
-            'g',
-          ),
-          `$1${classBSnakeUnderscore}$2$3`,
-        );
-      writeTextFile(fullPath, original, content);
+      let content = fs.readFileSync(fullPath, 'utf8');
+      content = content.replace(
+        new RegExp(`(\\/)${classASnake}(\\.ts)?([\\.\\/\\'\\\"\\\\])`, 'g'),
+        `$1${classBSnake}$2$3`,
+      );
+      fs.writeFileSync(fullPath, content, 'utf8');
     }
   }
 };
@@ -99,17 +78,12 @@ const replaceInFiles = (directory) => {
       if (file.name.startsWith('.') || file.name === 'node_modules') continue;
       replaceInFiles(fullPath);
     } else if (shouldProcessFile(file.name)) {
-      const original = readTextFile(fullPath);
-      if (original === null) continue;
-      const content = original
+      let content = fs.readFileSync(fullPath, 'utf8');
+      content = content
         .replace(new RegExp(classAUpper, 'g'), classBUpper)
         .replace(new RegExp(classALower, 'g'), classBLower)
-        .replace(new RegExp(classASnake, 'g'), classBSnake)
-        .replace(
-          new RegExp(classASnakeUnderscore, 'g'),
-          classBSnakeUnderscore,
-        );
-      writeTextFile(fullPath, original, content);
+        .replace(new RegExp(classASnake, 'g'), classBSnake);
+      fs.writeFileSync(fullPath, content, 'utf8');
     }
   }
 };
@@ -123,13 +97,8 @@ const renameFiles = (directory) => {
     if (file.isDirectory()) {
       if (file.name.startsWith('.') || file.name === 'node_modules') continue;
       renameFiles(fullPath);
-    } else if (
-      file.name.includes(classASnake) ||
-      file.name.includes(classASnakeUnderscore)
-    ) {
-      const newFileName = file.name
-        .replace(classASnake, classBSnake)
-        .replace(classASnakeUnderscore, classBSnakeUnderscore);
+    } else if (file.name.includes(classASnake)) {
+      const newFileName = file.name.replace(classASnake, classBSnake);
       fs.renameSync(fullPath, path.join(directory, newFileName));
     }
   }

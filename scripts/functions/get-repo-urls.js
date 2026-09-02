@@ -1,6 +1,6 @@
-/**
+/*
  * @license
- * Copyright (c) ggsuite
+ * Copyright (c) 2025 tssuite
  *
  * Use of this source code is governed by terms that can be
  * found in the LICENSE file in the root of this package.
@@ -9,13 +9,12 @@
 // Import Node.js built-in module for working with child processes
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { green, yellow } from './colors.js';
 
 // Convert exec to return a Promise for async/await usage
 const execAsync = promisify(exec);
 
 // GitHub organization or user
-const org = 'rljson';
+const org = 'tssuite';
 
 export async function getRepoUrls() {
   try {
@@ -30,14 +29,6 @@ export async function getRepoUrls() {
     // Map to name + URL and print to console
     return repos.map((repo) => repo.url);
   } catch (error) {
-    if (error.message.match('gh auth login').length == 1) {
-      throw Error(
-        [yellow('Not yet logged in. Please run:'), green('gh auth login')].join(
-          '\n',
-        ),
-      );
-    }
-
-    throw error;
+    console.error('Error fetching repositories:', error.message);
   }
 }
