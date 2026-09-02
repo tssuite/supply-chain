@@ -94,24 +94,8 @@
       "package": "@tssuite/dna-tssuite",
       "ecosystem": "node",
       "resolvedVersion": "0.1.1",
-      "via": "golden",
+      "via": null,
       "hash": "0x46ec01f569a8dbe1"
-    },
-    {
-      "name": "golden",
-      "package": "@tssuite/golden",
-      "ecosystem": "node",
-      "resolvedVersion": "1.0.0",
-      "via": null,
-      "hash": "0x3f45e03274f14d00"
-    },
-    {
-      "name": "project-root",
-      "package": "@tssuite/project-root",
-      "ecosystem": "node",
-      "resolvedVersion": "0.0.17",
-      "via": null,
-      "hash": "0x0853ad23ebbd09c4"
     },
     {
       "name": "self",
