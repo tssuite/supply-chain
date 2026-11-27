@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.0] - 2026-07-12
+## Unreleased
 
 Ports the improvements of the Dart `supply_chain` package versions 5.2.0 to
 5.4.2 to TypeScript: animation nodes, change-gating, mermaid markdown export,
